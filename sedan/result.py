@@ -17,7 +17,7 @@ class DbFailure(DbResult):
   here must be an exception, since DbValues will raise it when it is seen.
   """
   def __init__(self, error):
-    self.__value = err
+    self.__value = error
   @property
   def successful(self):
     return False

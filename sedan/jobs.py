@@ -7,8 +7,10 @@ class BatchJob(object):
   this are create, replace, update, and delete jobs.
   """
   def __init__(self, docid, promise):
+    self.__id      = docid
     self.__promise = promise
 
+  @property
   def promise(self):
     """Get the promise that was associated with this job"""
     return self.__promise
@@ -27,10 +29,9 @@ class BatchJob(object):
     """
     raise NotImplementedError
 
-  @property
-  def docid(self):
-    """Get the couch id for the document this job will be applying to."""
-    raise NotImplementedError
+class ReadJob(BatchJob):
+  def __init__(self, docid, promise):
+    BatchJob.__init__(self, docid, promise)
 
 class CreateJob(BatchJob):
   def __init__(self, docid, doc, promise):
@@ -43,8 +44,9 @@ class CreateJob(BatchJob):
     return self.__doc
 
 class ReplaceJob(BatchJob):
-  def __init__(self, docid, doc, promise):
+  def __init__(self, docid, doc, revision, promise):
     BatchJob.__init__(self, docid, promise)
+    self.__rev = revision
     self.__doc = doc
 
   def doc(self, current=None):

@@ -1,6 +1,17 @@
 """This is the core of our couch wrapper.  The CouchBatch class defined here
 is what end-users can use to efficiently query and update couchdb.
 """
+from couchdbkit.exceptions import ResourceNotFound
+from functools import partial
+
+from .promise import Promise
+from .result  import DbFailure
+from .result  import DbValue
+from .jobs    import ReadJob
+from .jobs    import CreateJob
+from .jobs    import ReplaceJob
+from .jobs    import UpdateJob
+from .jobs    import DeleteJob
 
 class CouchBatch(object):
   """This class allows the user to queue up numerous couch operations which
@@ -19,24 +30,8 @@ class CouchBatch(object):
   def _reset(self):
     """Setup the operations"""
     self._writes   = {}
-    self._reads    = set()
-    self._promises = {}
+    self._reads    = {}
     self._stats    = { 'read' : 0, 'write' : 0, 'fromcache' : 0 }
-
-  def _complete_promises(self, key, result):
-    """Write the result into all promises registered with this key, and then
-    clear out our recollection of those promises.
-    @param key    The couch key for the promise
-    @param result The DbResult to record
-    """
-    if key in self._promises:
-      for promise in self._promises[key]:
-        promise._complete(result)
-      del self._promises(key)
-
-  def _add_promise(self, key, promise):
-    """Append a promise onto the key's promise list."""
-    self._promises.setdefault(key, []).append(promise)
 
   def get(self, *keys, **kwargs):
     """Get the desired documents from couch.  This will return a dictionary of
@@ -51,7 +46,7 @@ class CouchBatch(object):
     @param cached A boolean keyword argument indicating whether we are allowed
                   to return cached values.  Defaults to True.
     """
-    keys = set(keys)
+    keys   = set(keys)
     result = {}
 
     if kwargs.get('cached', True):
@@ -59,103 +54,98 @@ class CouchBatch(object):
         try:
           cached = self.__docCache[key]
           promise = Promise(lambda: None)
-          promise._fulfill(cached)
+          promise._fulfill(DbValue(cached))
           result[key] = promise
           self._stats['fromcache'] += 1
         except KeyError:
           pass
 
-    keys = keys - set(result)
-    for key in keys:
-      promise     = Promise(self.do_reads)
-      result[key] = promise
-      self._add_promise(key, promise)
-      self._reads.add(key)
+    notcached = keys - set(result)
+    for key in notcached:
+      result[key] = _set_job(self._reads, key, self.do_reads,
+          partial(ReadJob, key))
 
     return result
 
-  def __getitem__(self, key):
-    """Gets the doc (actual doc, not raw couchdb doc) referenced by the given
-    key, or raises KeyError if the key was not found in the database.  If key
-    is a non-string iterable, then this will return the docs in the order of
-    the given keys, with None values for keys that were not found.
-    """
-    if isinstance(key, basestring):
-      record = self.get(key)[key]
-      if not record:
-        raise KeyError
-      return record['doc']
-
-    records = self.get(*key)
-    result  = []
-    for k in key:
-      record = records[k]
-      if not record:
-        result.append(None)
-      else:
-        result.append(record['doc'])
-    return result
-
-  def view(self, vname, **kwargs):
-    """Run a view.  It can be useful to run a view through the couch batch
-    rather than directly through the couchkit object because when include_docs
-    is given, the docs get added to the batch's cache.
-    @param vname  The name of the view to query
-    @param kwargs CouchDB view arguments
-    @return The result of the view
-    """
-    rows = self.__ck.view(vname, **kwargs)
+  def do_reads(self):
+    """Fulfill all of the promises outstanding on ".get" requests."""
+    keys    = list(self._reads)
+    results = self.__ck.all_docs(keys=keys, include_docs=True)
     self._stats['read'] += 1
-    if kwargs.get('include_docs'):
-      for row in rows:
-        doc = row['doc']
-        rev = doc['_rev']
-        did = doc['_id']
-        if did in self.__docCache:
-          continue
-        self.__docCache[did] = {
-            'doc' : doc,
-            'id'  : did,
-            'key' : did,
-            'value' : {'rev':rev},
-            }
-    return rows
 
-  def _sanity(self):
-    """We do not allow the same keys to appear in any two of our operation
-    maps.  Ensure that that's the case.
-    """
-    c = set(self._creates)
-    u = set(self._updates)
-    d = self._deletes
-    assert len(c.intersection(u).intersection(d)) == 0
+    for row in results:
+      key = row['key']
+      if 'doc' in row:
+        _fulfill(self._reads, key, DbValue(row))
+        self.__docCache[key] = row
+      elif row.get('error') == 'not_found':
+        _fulfill(self._reads, key, DbFailure(ResourceNotFound(row)))
+      else:
+        raise RuntimeError("Unknown couch error type: %s" % row)
+
+#  def view(self, vname, **kwargs):
+#    """Run a view.  It can be useful to run a view through the couch batch
+#    rather than directly through the couchkit object because when include_docs
+#    is given, the docs get added to the batch's cache.
+#    @param vname  The name of the view to query
+#    @param kwargs CouchDB view arguments
+#    @return The result of the view
+#    """
+#    rows = self.__ck.view(vname, **kwargs)
+#    self._stats['read'] += 1
+#    if kwargs.get('include_docs'):
+#      for row in rows:
+#        doc = row['doc']
+#        rev = doc['_rev']
+#        did = doc['_id']
+#        if did in self.__docCache:
+#          continue
+#        self.__docCache[did] = {
+#            'doc' : doc,
+#            'id'  : did,
+#            'key' : did,
+#            'value' : {'rev':rev},
+#            }
+#    return rows
 
   def create(self, key, document):
-    """Queue up a document creation.  This will fail immediately if we've
-    already been told to create this document.  If the key is scheduled for
-    updating, this will fail because the doc would already exist.  If the key
-    is scheduled for deletion, the delete will no longer be scheduled.
+    """Create a new document.  The promise returned from this will have a
+    value that either raises an exception or returns a dictionary with the
+    keys "rev" and "id".
 
+    Create will fail if the document already exists in couch; this means that
+    if we have the key in our doc cache, or if the document is scheduled to be
+    created already, the returned promise will be a failure.
+    
     @param key      The key at which to store the given document
     @param document The data to store (should be a dictionary)
     """
-    if key in self._creates:
-      if document == self._creates[key]:
-        return
-      raise ValueError("Attempt to re-create document %s" % key)
+    if (key not in self._writes) and (key not in self.__docCache):
+      # We know nothing of this key, we we'll queue it up for writing
+      promise = Promise(self.do_writes)
+      self._writes[key] = CreateJob(key, document, promise)
+      return promise
 
-    if key in self._updates:
-      # the update will cause the doc to be created empty, so this create is
-      # invalid
-      raise ValueError("Attempt to create a doc that is being updated")
+    elif key in self._writes:
+      # We know that we are supposed to be doing something with this key
+      # already; this might not be a failure, however
+      if isinstance(self._writes[key], DeleteJob):
+        # They wanted to delete before, but now they want to create, so we'll
+        # just stomp what was there
+        promise = _set_job(self._writes, key, self.do_writes,
+            partial(ReplaceJob, key, document, None))
+        return promise
 
-    if key in self._deletes:
-      # create after delete? we'll skip the delete
-      self._deletes.remove(key)
-      document['__overwrite'] = True
-
-    self._creates[key] = document
-    self._sanity()
+    # We know that the key is either a non-deleting write or is in our cache
+    # (thus known to exist).  We'll return a promise that's already set as a
+    # failure.
+    promise = Promise(lambda: None)
+    promise._fulfill(DbFailure(ResourceConflict({
+      'id'     : key,
+      'error'  : 'conflict',
+      'reason' : 'Document update conflict.',
+      })))
+    return promise
 
   def update(self, key, updatefn):
     """Queue up a document update function.  On commit, the document
@@ -403,4 +393,38 @@ class CouchBatch(object):
         continue
       doc['_rev'] = rev
     return []
+
+def _fulfill(jobs, key, result):
+  """Complete the promises outstanding for the given document key.
+
+  @param jobs   The key -> Job dictionary for read or write jobs
+  @param key    The couch key for the promise
+  @param result The DbResult to record
+  """
+  if key in jobs:
+    jobs[key].promise._fulfill(result)
+    del jobs[key]
+
+def _set_job(jobs, key, completer_fn, job_fn):
+  """Assign (or re-assign) the job for the given key.  This generates a new
+  Promise chained to the promise of the already-present job for the key (if
+  any).  It then gives that promise to the given job_fn to generate a new Job,
+  which it stores in the jobs dictionary.  The new promise is returned from
+  this function.
+
+  @param jobs         The dictionary of key -> Job
+  @param key          The key we want to set the job for
+  @param completer_fn The function the promise needs to call when its value is
+                      requested
+  @param job_fn       The function that will give us a Job
+  @return             A new promise object to give to the user
+  """
+  try:
+    prev_promise = jobs[key].promise
+  except KeyError:
+    prev_promise = None
+  
+  promise = Promise(completer_fn, prev_promise)
+  jobs[key] = job_fn(promise)
+  return promise
 

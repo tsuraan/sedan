@@ -1,6 +1,9 @@
 """This is the definition of the Promise class, which is what all couch
 bulk operations return.
 """
+from .result import DbFailure
+from .result import DbResult
+from .result import DbValue
 
 class Promise(object):
   """This is what is returned by the single-document database interaction
@@ -13,13 +16,16 @@ class Promise(object):
   represents the result from the database, it will either return a dictionary
   or it will raise an exception.
   """
-  def __init__(self, completer_fn):
+  def __init__(self, completer_fn, previous=None):
     self.__completer = completer_fn
     self.__result    = None
+    if previous:
+      assert isinstance(previous, Promise)
+    self.__previous  = previous
 
   def value(self):
     if not self.__result:
-      self.completer_fn()
+      self.__completer()
 
     assert isinstance(self.__result, DbResult)
     if isinstance(self.__result, DbFailure):
@@ -33,4 +39,7 @@ class Promise(object):
       raise RuntimeError("Promise already completed")
     assert isinstance(result, DbResult)
     self.__result = result
+    if self.__previous:
+      self.__previous._fulfill(result)
+
 
