@@ -1,6 +1,7 @@
 """Different jobs that we enqueue into our job queues.  These will generally
 not be needed by the end-user.
 """
+import copy
 
 class BatchJob(object):
   """Object representing a job that needs to be done.  Current subclasses of
@@ -41,7 +42,8 @@ class ReadJob(BatchJob):
 class CreateJob(BatchJob):
   def __init__(self, docid, doc, promise):
     BatchJob.__init__(self, docid, promise, False)
-    self.__doc = doc
+    self.__doc = copy.deepcopy(doc)
+    self.__doc['_id'] = docid
 
   def doc(self, current=None):
     if current is not None:
@@ -52,9 +54,12 @@ class ReplaceJob(BatchJob):
   def __init__(self, docid, doc, revision, promise):
     BatchJob.__init__(self, docid, promise, True)
     self.__rev = revision
-    self.__doc = doc
+    self.__doc = copy.deepcopy(doc)
+    self.__doc['_id'] = docid
 
   def doc(self, current=None):
+    if current:
+      self.__doc['_rev'] = current['_rev']
     return self.__doc
 
 class UpdateJob(BatchJob):

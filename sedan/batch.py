@@ -126,7 +126,7 @@ class CouchBatch(object):
 
     for job in self._writes.values():
       try:
-        docs.append(job.doc())
+        bulk_write.append(job.doc())
       except BatchJobNeedsDocument:
         current = self.get(job.docid)
         needcurrent.append( (current, job) )
@@ -146,7 +146,7 @@ class CouchBatch(object):
 
     retries = []
     for result in results:
-      key = job['id']
+      key = result['id']
       job = self._writes[key]
       if 'error' in results:
         if job.can_retry:
@@ -155,7 +155,7 @@ class CouchBatch(object):
         else:
           job.promise._fulfill(DbFailure(result))
       else:
-        job.promise._fulfill(DbSuccess(result))
+        job.promise._fulfill(DbValue(result))
 
     self._writes = dict( (job.docid, job) for job in retries )
     if self._writes:

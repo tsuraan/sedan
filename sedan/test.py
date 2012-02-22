@@ -29,16 +29,20 @@ def canned(testCase):
     })
   testCase.batch = CouchBatch(testCase.ck)
 
-class TestGet(unittest.TestCase):
+class BaseTest(unittest.TestCase):
   def setUp(self):
     canned(self)
 
   def assertReadStat(self, num):
     self.assertEqual(self.batch._stats['read'], num)
 
-  def _cleanDoc(self, doc):
+  def assertWriteStat(self, num):
+    self.assertEqual(self.batch._stats['write'], num)
+
+  def cleanDoc(self, doc):
     return dict( ( key, doc[key] ) for key in doc if not key.startswith('_') )
 
+class TestGet(BaseTest):
   def testSingle(self):
     """Getting one existing doc works"""
     b1 = self.batch.get('b')['b']
@@ -47,7 +51,7 @@ class TestGet(unittest.TestCase):
     b1 = b1.value()['doc']
     self.assertReadStat(1)
 
-    b = self._cleanDoc(b1)
+    b = self.cleanDoc(b1)
     self.assertEqual(b, self.b)
 
     # And, make sure we read from cache
@@ -68,9 +72,9 @@ class TestGet(unittest.TestCase):
     c1 = d1['c'].value()['doc']
     self.assertReadStat(1)
 
-    a = self._cleanDoc(a1)
-    b = self._cleanDoc(b1)
-    c = self._cleanDoc(c1)
+    a = self.cleanDoc(a1)
+    b = self.cleanDoc(b1)
+    c = self.cleanDoc(c1)
 
     self.assertEqual(a, self.a)
     self.assertEqual(b, self.b)
@@ -103,10 +107,10 @@ class TestGet(unittest.TestCase):
     c2 = e['c'].value()['doc']
     self.assertReadStat(1)
 
-    self.assertEqual(self.a, self._cleanDoc(a1))
-    self.assertEqual(self.b, self._cleanDoc(b1))
-    self.assertEqual(self.c, self._cleanDoc(c1))
-    self.assertEqual(self.c, self._cleanDoc(c2))
+    self.assertEqual(self.a, self.cleanDoc(a1))
+    self.assertEqual(self.b, self.cleanDoc(b1))
+    self.assertEqual(self.c, self.cleanDoc(c1))
+    self.assertEqual(self.c, self.cleanDoc(c2))
 
 
   def testMissing(self):
@@ -121,19 +125,29 @@ class TestGet(unittest.TestCase):
     self.assertRaises(ResourceNotFound, d1['missing-key'].value)
     self.assertReadStat(1)
 
-    self.assertEqual(self._cleanDoc(a1), self.a)
-    self.assertEqual(self._cleanDoc(c1), self.c)
+    self.assertEqual(self.cleanDoc(a1), self.a)
+    self.assertEqual(self.cleanDoc(c1), self.c)
 
     # Ensure that re-getting value keeps raising the exception
     self.assertRaises(ResourceNotFound, d1['missing-key'].value)
     self.assertReadStat(1)
 
-class TestCreate(unittest.TestCase):
-  def setUp(self):
-    canned(self)
-
+class TestCreate(BaseTest):
   def testSuccess(self):
     """Making a single document works"""
+    promise = self.batch.create('d', {'foo':'bar','bar':'baz'})
+    self.assertReadStat(0)
+    self.assertWriteStat(0)
+
+    self.assertEqual(promise.value(), {'rev':1, 'id':'d'})
+    self.assertReadStat(0)
+    self.assertWriteStat(1)
+
+    promise = self.batch.get('d')['d']
+    self.assertEqual(self.cleanDoc(promise.value()['doc']),
+        {'foo':'bar','bar':'baz'})
+    self.assertReadStat(1)
+    self.assertWriteStat(1)
 
 class TestCouchKit(unittest.TestCase):
   def normalize_revision(self, row):
