@@ -1,6 +1,7 @@
 from .batch import ResourceNotFound
 from .batch import CouchBatch
 
+from couchdbkit.exceptions import BulkSaveError
 import unittest
 import random
 import copy
@@ -134,6 +135,95 @@ class TestCreate(unittest.TestCase):
   def testSuccess(self):
     """Making a single document works"""
 
+class TestCouchKit(unittest.TestCase):
+  def normalize_revision(self, row):
+    if isinstance(row.get('value',{}).get('rev'), basestring):
+      row['value']['rev'] = int(row['value']['rev'].split('-')[0])
+    if isinstance(row.get('rev'), basestring):
+      row['rev'] = int(row['rev'].split('-')[0])
+    if isinstance(row.get('doc',{}).get('_rev'), basestring):
+      row['doc']['_rev'] = int(row['doc']['_rev'].split('-')[0])
+
+  def setUp(self):
+    canned(self)
+
+  def testGet(self):
+    """Simple get works"""
+    result = sorted(self.ck.all_docs(keys=['a','c']).all())
+    map(self.normalize_revision, result)
+
+    self.assertEqual(result, [
+      {'key':'a', 'id':'a','value':{'rev':1}},
+      {'key':'c', 'id':'c','value':{'rev':1}},
+      ])
+    return
+
+  def testGetMissing(self):
+    """Get with a missing value returns the expected data"""
+    result = sorted(self.ck.all_docs(keys=['a','c','e']).all())
+    map(self.normalize_revision, result)
+
+    self.assertEqual(result, [
+      {'error': 'not_found', 'key':'e'},
+      {'key':'a', 'id':'a','value':{'rev':1}},
+      {'key':'c', 'id':'c','value':{'rev':1}},
+      ])
+    return
+
+  def testCreate(self):
+    """Simple document creation works"""
+    result = self.ck.bulk_save([{'_id':'d', 'alpha':12}])
+    map(self.normalize_revision, result)
+    self.assertEqual(result, [{'rev':1, 'id':'d'}])
+
+    result = self.ck.all_docs(keys=['d'], include_docs=True)
+    map(self.normalize_revision, result)
+
+    for idx, row in enumerate(result):
+      self.assertEqual(idx, 0)
+      self.assertEqual(row, {
+        'doc':{'_id':'d','_rev':1,'alpha':12},
+        'id':'d',
+        'key':'d',
+        'value':{'rev':1},
+        })
+    return
+
+  def testConflict(self):
+    """Make sure conflicts raise exceptions"""
+    with self.assertRaises(BulkSaveError) as r:
+      self.ck.bulk_save([{'_id':'a', 'alpha':'dog'},
+        {'_id':'d', 'alpha':12}])
+
+    map(self.normalize_revision, r.exception.results)
+    self.assertEqual(sorted(r.exception.results),
+        [ {'id':'d', 'rev':1},
+          { 'error': 'conflict',
+            'id':'a',
+            'reason':'Document update conflict.',
+            },
+          ])
+
+    result = self.ck.all_docs(keys=['a','d'], include_docs=True).all()
+    map(self.normalize_revision, result)
+    self.assertEqual(result,
+        [{ 'doc': {'_id':'a',
+                   '_rev':1,
+                   'alpha':1,
+                   'beta':2,
+                   },
+           'id':'a',
+           'key':'a',
+           'value':{'rev':1}},
+         { 'doc': {'_id':'d',
+                   '_rev':1,
+                   'alpha':12},
+           'id':'d',
+           'key':'d',
+           'value':{'rev':1}}])
+
+
+
 class FakeResults(object):
   def __init__(self, results):
     self.__results = results
@@ -161,7 +251,7 @@ class FakeCK(object):
     """
     docs = copy.deepcopy(docs)
     for key, doc in docs.items():
-      doc['_rev'] = 0
+      doc['_rev'] = 1
       doc['_id']  = key
 
     self.__docs = docs
@@ -192,13 +282,13 @@ class FakeCK(object):
 
     return FakeResults(results)
 
-  def bulk_save(docs):
+  def bulk_save(self, docs):
     """Store the docs as given, except for the docs that have '_deleted':True;
     those docs will indicate that a key needs deleting.  For all docs, the
     '_rev' key of the doc must match the stored rev, or an exception is
     thrown.
     """
-    docs    = self.__docs
+    stored    = self.__docs
     results = []
     for doc in docs:
       rev = doc.get('_rev')
@@ -211,16 +301,16 @@ class FakeCK(object):
           'id'     : key,
           'reason' : 'Document update conflict.',
           }
-      if (key in docs) and (docs[key]['_rev'] != rev) or (
-          rev and (key not in docs)):
+      if (key in stored) and (stored[key]['_rev'] != rev) or (
+          rev and (key not in stored)):
         results.append(conflict)
         continue
 
       # The next thing to look for is a delete
       if doc.get('_deleted') == True:
         try:
-          found = docs[key]
-          del docs[key]
+          found = stored[key]
+          del stored[key]
           results.append({'rev': found['_rev']+1, 'id':key})
           continue
         except KeyError:
@@ -230,8 +320,8 @@ class FakeCK(object):
       # Ok, the revision is good, and it's not a delete, so store the doc
       doc = copy.deepcopy(doc)
       doc['_id']  = key
-      doc['_rev'] = docs.get(key,{}).get('_rev',-1) + 1
-      docs[key] = doc
+      doc['_rev'] = stored.get(key,{}).get('_rev', 0) + 1
+      stored[key] = doc
       results.append({'rev':doc['_rev'], 'id':key})
 
     errors = [r for r in results if r.get('error')]
@@ -241,7 +331,7 @@ class FakeCK(object):
 
   def randid(self):
     """Generate a random docid"""
-    return ''.join(chr(random.randint(0,255) for _ in range(16))).encode('hex')
+    return ''.join(chr(random.randint(0,255)) for _ in range(16)).encode('hex')
 
 if __name__ == "__main__":
   unittest.main()
