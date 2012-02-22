@@ -10,4 +10,3 @@ class BatchJobForbidsDocument(Exception):
   and the batch job needs the document to not exist.
   """
 
-

@@ -2,6 +2,7 @@ from .batch import ResourceNotFound
 from .batch import CouchBatch
 
 import unittest
+import random
 import copy
 
 def canned(testCase):
@@ -127,7 +128,11 @@ class TestGet(unittest.TestCase):
     self.assertReadStat(1)
 
 class TestCreate(unittest.TestCase):
-  pass
+  def setUp(self):
+    canned(self)
+
+  def testSuccess(self):
+    """Making a single document works"""
 
 class FakeResults(object):
   def __init__(self, results):
@@ -186,6 +191,57 @@ class FakeCK(object):
         results.append( {'key' : key, 'error' : 'not_found'} )
 
     return FakeResults(results)
+
+  def bulk_save(docs):
+    """Store the docs as given, except for the docs that have '_deleted':True;
+    those docs will indicate that a key needs deleting.  For all docs, the
+    '_rev' key of the doc must match the stored rev, or an exception is
+    thrown.
+    """
+    docs    = self.__docs
+    results = []
+    for doc in docs:
+      rev = doc.get('_rev')
+      key = doc.get('_id', self.randid())
+
+      # First we'll make sure we don't have any revision issues
+      conflicted = False
+      conflict = {
+          'error'  : 'conflict',
+          'id'     : key,
+          'reason' : 'Document update conflict.',
+          }
+      if (key in docs) and (docs[key]['_rev'] != rev) or (
+          rev and (key not in docs)):
+        results.append(conflict)
+        continue
+
+      # The next thing to look for is a delete
+      if doc.get('_deleted') == True:
+        try:
+          found = docs[key]
+          del docs[key]
+          results.append({'rev': found['_rev']+1, 'id':key})
+          continue
+        except KeyError:
+          results.append(conflict)
+          continue
+
+      # Ok, the revision is good, and it's not a delete, so store the doc
+      doc = copy.deepcopy(doc)
+      doc['_id']  = key
+      doc['_rev'] = docs.get(key,{}).get('_rev',-1) + 1
+      docs[key] = doc
+      results.append({'rev':doc['_rev'], 'id':key})
+
+    errors = [r for r in results if r.get('error')]
+    if errors:
+      raise BulkSaveError(errors, results)
+    return results
+
+  def randid(self):
+    """Generate a random docid"""
+    return ''.join(chr(random.randint(0,255) for _ in range(16))).encode('hex')
 
 if __name__ == "__main__":
   unittest.main()

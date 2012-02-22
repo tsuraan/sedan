@@ -2,16 +2,17 @@
 is what end-users can use to efficiently query and update couchdb.
 """
 from couchdbkit.exceptions import ResourceNotFound
-from functools import partial
+from functools             import partial
 
-from .promise import Promise
-from .result  import DbFailure
-from .result  import DbValue
-from .jobs    import ReadJob
-from .jobs    import CreateJob
-from .jobs    import ReplaceJob
-from .jobs    import UpdateJob
-from .jobs    import DeleteJob
+from .exceptions import BatchJobNeedsDocument
+from .promise    import Promise
+from .result     import DbFailure
+from .result     import DbValue
+from .jobs       import ReadJob
+from .jobs       import CreateJob
+from .jobs       import ReplaceJob
+from .jobs       import UpdateJob
+from .jobs       import DeleteJob
 
 class CouchBatch(object):
   """This class allows the user to queue up numerous couch operations which
@@ -27,11 +28,34 @@ class CouchBatch(object):
   def clear_cache(self):
     self.__docCache = {}
 
+  def forget(self, key):
+    """Remove a given document from the cache"""
+    try:
+      del self.__docCache[key]
+    except KeyError:
+      pass
+
   def _reset(self):
     """Setup the operations"""
     self._writes   = {}
     self._reads    = {}
     self._stats    = { 'read' : 0, 'write' : 0, 'fromcache' : 0 }
+
+  def do_reads(self):
+    """Fulfill all of the promises outstanding on ".get" requests."""
+    keys    = list(self._reads)
+    results = self.__ck.all_docs(keys=keys, include_docs=True)
+    self._stats['read'] += 1
+
+    for row in results:
+      key = row['key']
+      if 'doc' in row:
+        _fulfill(self._reads, key, DbValue(row))
+        self.__docCache[key] = row
+      elif row.get('error') == 'not_found':
+        _fulfill(self._reads, key, DbFailure(ResourceNotFound(row)))
+      else:
+        raise RuntimeError("Unknown couch error type: %s" % row)
 
   def get(self, *keys, **kwargs):
     """Get the desired documents from couch.  This will return a dictionary of
@@ -67,22 +91,6 @@ class CouchBatch(object):
 
     return result
 
-  def do_reads(self):
-    """Fulfill all of the promises outstanding on ".get" requests."""
-    keys    = list(self._reads)
-    results = self.__ck.all_docs(keys=keys, include_docs=True)
-    self._stats['read'] += 1
-
-    for row in results:
-      key = row['key']
-      if 'doc' in row:
-        _fulfill(self._reads, key, DbValue(row))
-        self.__docCache[key] = row
-      elif row.get('error') == 'not_found':
-        _fulfill(self._reads, key, DbFailure(ResourceNotFound(row)))
-      else:
-        raise RuntimeError("Unknown couch error type: %s" % row)
-
 #  def view(self, vname, **kwargs):
 #    """Run a view.  It can be useful to run a view through the couch batch
 #    rather than directly through the couchkit object because when include_docs
@@ -107,6 +115,58 @@ class CouchBatch(object):
 #            'value' : {'rev':rev},
 #            }
 #    return rows
+
+  def do_writes(self, retries=5):
+    """Run the current batch of write operations.  This will fulfill all the
+    promises we have outstanding on create, overwrite, update, and delete
+    operations.
+    """
+    bulk_write  = []
+    needcurrent = []
+
+    for job in self._writes.values():
+      try:
+        docs.append(job.doc())
+      except BatchJobNeedsDocument:
+        current = self.get(job.docid)
+        needcurrent.append( (current, job) )
+
+    for current, job in needcurrent:
+      try:
+        value = current.value()
+        bulk_write.append(job.doc(value))
+      except ResourceNotFound, e:
+        job.promise._fulfill(DbFailure(e))
+
+    try:
+      self._stats['write'] += 1
+      results = self.__ck.bulk_save(bulk_write)
+    except BulkSaveError, e:
+      results = e.results
+
+    retries = []
+    for result in results:
+      key = job['id']
+      job = self._writes[key]
+      if 'error' in results:
+        if job.can_retry:
+          retries.append(job)
+          self.forget(job.docid)
+        else:
+          job.promise._fulfill(DbFailure(result))
+      else:
+        job.promise._fulfill(DbSuccess(result))
+
+    self._writes = dict( (job.docid, job) for job in retries )
+    if self._writes:
+      if retries > 0:
+        self.do_writes(retries-1)
+      else:
+        for job in self._writes.values():
+          job.promise._fulfill(DbFailure(_make_conflict(job.docid)))
+        self._writes = {}
+
+    assert self._writes == {}
 
   def create(self, key, document):
     """Create a new document.  The promise returned from this will have a
@@ -140,11 +200,7 @@ class CouchBatch(object):
     # (thus known to exist).  We'll return a promise that's already set as a
     # failure.
     promise = Promise(lambda: None)
-    promise._fulfill(DbFailure(ResourceConflict({
-      'id'     : key,
-      'error'  : 'conflict',
-      'reason' : 'Document update conflict.',
-      })))
+    promise._fulfill(DbFailure(_make_conflict(key)))
     return promise
 
   def update(self, key, updatefn):
@@ -427,4 +483,13 @@ def _set_job(jobs, key, completer_fn, job_fn):
   promise = Promise(completer_fn, prev_promise)
   jobs[key] = job_fn(promise)
   return promise
+
+def _make_conflict(key):
+  """Generate a ResourceConflict exception object for the given key"""
+  conflict = ResourceConflict({
+    'id'     : key,
+    'error'  : 'conflict',
+    'reason' : 'Document update conflict.',
+    })
+  return conflict
 

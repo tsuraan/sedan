@@ -6,9 +6,10 @@ class BatchJob(object):
   """Object representing a job that needs to be done.  Current subclasses of
   this are create, replace, update, and delete jobs.
   """
-  def __init__(self, docid, promise):
+  def __init__(self, docid, promise, can_retry):
     self.__id      = docid
     self.__promise = promise
+    self.__retry   = can_retry
 
   @property
   def promise(self):
@@ -18,6 +19,10 @@ class BatchJob(object):
   @property
   def docid(self):
     return self.__id
+
+  @property
+  def can_retry(self):
+    return self.__retry
 
   def doc(self, current=None):
     """Get the document that needs to be batch-submitted to the database.  If
@@ -31,11 +36,11 @@ class BatchJob(object):
 
 class ReadJob(BatchJob):
   def __init__(self, docid, promise):
-    BatchJob.__init__(self, docid, promise)
+    BatchJob.__init__(self, docid, promise, False)
 
 class CreateJob(BatchJob):
   def __init__(self, docid, doc, promise):
-    BatchJob.__init__(self, docid, promise)
+    BatchJob.__init__(self, docid, promise, False)
     self.__doc = doc
 
   def doc(self, current=None):
@@ -45,7 +50,7 @@ class CreateJob(BatchJob):
 
 class ReplaceJob(BatchJob):
   def __init__(self, docid, doc, revision, promise):
-    BatchJob.__init__(self, docid, promise)
+    BatchJob.__init__(self, docid, promise, True)
     self.__rev = revision
     self.__doc = doc
 
@@ -54,17 +59,17 @@ class ReplaceJob(BatchJob):
 
 class UpdateJob(BatchJob):
   def __init__(self, docid, fn, promise):
-    BatchJob.__init__(self, docid, promise)
+    BatchJob.__init__(self, docid, promise, True)
     self.__fn = fn
 
   def doc(self, current=None):
     if current is None:
       raise BatchJobNeedsDocument
-    return self.__fn(current)
+    return self.__fn(current['doc'])
 
 class DeleteJob(BatchJob):
   def __init__(self, docid, promise):
-    BatchJob.__init__(self, docid, promise)
+    BatchJob.__init__(self, docid, promise, True)
 
   def doc(self, current=None):
     if current is None:
@@ -72,8 +77,8 @@ class DeleteJob(BatchJob):
     if not current:
       return None
     doc = {
-        '_id'      : doc['_id'],
-        '_rev'     : doc['_rev'],
+        '_id'      : current['_id'],
+        '_rev'     : current['_rev'],
         '_deleted' : True,
         }
     return doc
