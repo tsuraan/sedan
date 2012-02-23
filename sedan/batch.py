@@ -19,10 +19,50 @@ from .jobs       import UpdateJob
 from .jobs       import DeleteJob
 
 class CouchBatch(object):
-  """This class allows the user to queue up numerous couch operations which
-  will be submitted as a single save_docs call when the commit() method is
-  called.  The only time this ever touches couchdb is when the commit() method
-  is called; otherwise, this is completely local.
+  """An efficient job batcher for CouchDB.  All the database-access functions
+  of this class (.get, .create, .overwrite, .update, and .delete) return a
+  promise object without accessing the database.  When that promise object's
+  value() method is called, all the accumulated work that the batch has been
+  given will ideally be sent to the database in a single operation.  Sometimes
+  reads and retries will be necessary, but this still tends to be more
+  efficient than doing a ton of reads and writes in the sane ordering that a
+  programmer wants to use.
+
+  Since we batch operations for efficiency, actions on the same key may cause
+  conflicts.  Rather than coming up with creative and disturbing ways for
+  operations on a single key to interact without touching the database, I've
+  implemented the more sane optimizations and defined errors for the rest of
+  the cases.  The top of this table is the current activity scheduled for the
+  key, and the left side is the activity that the user is trying to schedule
+  on top of the existing activity:
+
+             Current Action
+  New Action
+             | create        | overwrite     | update        | delete
+  -----------+---------------+---------------+---------------+----------------
+  create     | New activity  |               |               |
+             | fails with    |               |               |
+             | Resource-     |               |               |
+             | Conflict      |               |               |
+             |               |               |               |
+  overwrite  | New activity  |               |               |
+             | is scheduled, |               |               |
+             | both promises |               |               |
+             | will succeed  |               |               |
+             | when overwrite|               |               |
+             | runs          |               |               |
+             |               |               |               |
+  update     | Update is     |               |               |
+             | applied to new|               |               |
+             | document; both|               |               |
+             | promises are  |               |               |
+             | dependent on  |               |               |
+             | success of    |               |               |
+             | creation      |               |               |
+             |               |               |               |
+  delete     | Fails with    |               |               |
+             | Creation-     |               |               |
+             | Pending       |               |               |
   """
   def __init__(self, couchkit):
     self.__ck = couchkit
@@ -161,13 +201,11 @@ class CouchBatch(object):
       else:
         job.promise._fulfill(DbValue(result))
         doc = bulk_write[key]
-        if doc.get('_deleted') != True:
+        if doc.get('_deleted') == True:
+          self.forget(key)
+        else:
           doc = copy.deepcopy(doc)
-          try:
-            doc['_rev'] = result['rev']
-          except KeyError:
-            pp(result)
-            raise
+          doc['_rev'] = result['rev']
           self.__docCache[key] = {
               'id' : key,
               'key' : key,
@@ -226,15 +264,23 @@ class CouchBatch(object):
     with the keys "rev", "id", and "ok", or it will raise a ResourceNotFound
     exception.
 
+    If there is already a job pending for the given key, that job will be
+    completed with a failure of ResourceNotFound, since it was logically
+    deleted before it could be created or modified in the database.
+
     @param key  The key of the document to delete.
     """
-    raise NotImplementedError
-    if key not in self._writes:
-      promise = Promise(self.do_writes)
-      self._writes[key] = DeleteJob(key, promise)
-      return promise
+    try:
+      current = self._writes[key]
+    except KeyError:
+      pass
+    else:
+      current.promise._fulfill(DbFailure(ResourceNotFound))
 
-    
+    promise = Promise(self.do_writes)
+    self._writes[key] = DeleteJob(key, promise)
+    return promise
+
 
   def update(self, key, updatefn):
     """Queue up a document update function.  On commit, the document
@@ -259,212 +305,6 @@ class CouchBatch(object):
     @param key      The key of the document to update
     @param updatefn The function that will transform the document data
     """
-    if key in self._deletes:
-      doc = updatefn({})
-      if doc:
-        self._deletes.remove(key)
-        doc['__overwrite'] = True
-        self._creates[key] = doc
-      return
-
-    if key in self._creates:
-      doc = copy.deepcopy(self._creates[key])
-      doc = updatefn(doc)
-      if doc:
-        self._creates[key] = doc
-      return
-
-    self._updates.setdefault(key, []).append(updatefn)
-    self._sanity()
-
-  def commit(self, retries=5):
-    """Do the actual database operations.  If only creates have been done,
-    this can complete in a single database operation.  If that operation fails
-    (usually due to conflicts), then a read will be done possibly followed by
-    more write attempts.  If update or delete have been used, a query will be
-    done to read in the docs associated with the keys, and then writes will be
-    done as normal.
-    """
-    bulk_insert = []
-
-    # Build the list of couch keys we need to fetch
-    lookups = list(set(self._updates).union(self._deletes))
-    for key, doc in self._creates.items():
-      if '__overwrite' in doc:
-        lookups.add(key)
-
-    if lookups:
-      lresult = self.get(*lookups)
-      bulk_insert.extend(self._process_updates(lresult))
-      bulk_insert.extend(self._process_deletes(lresult))
-      bulk_insert.extend(self._process_creates(lresult))
-
-    for key, doc in self._creates.items():
-      if '__overwrite' in doc:
-        # We don't want to submit the __overwrite part to couch, but we do want
-        # to keep it in our real copy in case we need to retry.  create a deep
-        # copy, strip __overwrite from that, and put that in the bulk_insert
-        # list.
-        doc = copy.deepcopy(doc)
-        del doc['__overwrite']
-      doc['_id'] = key
-      bulk_insert.append(doc)
-
-    try:
-      # Whether or not this bulk insert works, none of our cached values for
-      # the updated docs are things we really want to keep using, so we'll
-      # first forget all of that
-      for doc in bulk_insert:
-        self.forget(doc['_id'])
-
-      self.__ck.save_docs(bulk_insert)
-      self._stats['write'] += 1
-      print 'bulk save success!'
-      self._reset()
-      return
-    except K.BulkSaveError, err:
-      failures = [e['id'] for e in err.errors]
-      print 'bulk save had failures in the keys:', failures
-      retry_c  = {} # new creates, for retry
-      retry_u  = {} # new updates, for retry
-      retry_d  = {} # new deletes, for retry
-
-      for key in failures:
-        if key in self._creates:
-          retry_c[key] = self._creates[key]
-        elif key in self._updates:
-          retry_u[key] = self._updates[key]
-        elif key in self._deletes:
-          retry_d[key] = self._deletes[key]
-        else:
-          # I think this isn't possible...
-          print 'failures returned an unclaimed key!', key
-
-      self._reset()
-      if retries <= 0:
-        raise BatchCommitFailure("Out of retries", retry_c, retry_u, retry_d)
-
-      if retry_c:
-        # For failures to update or delete, we can just try a few more times
-        # with updated version numbers.  For creates, we need to do a bit of
-        # work to determine whether the create failures are fatal or
-        # ignorable.  Generally, when the user told us to create something and
-        # we fail, then we have an error.  However, due to the way we do batch
-        # optimizations, a delete followed by a create or updated won't be a
-        # fatal error when the create fails; instead, we'll read what is in
-        # the database and stomp over it.
-        non_stomp = []
-        for doc in retry_c.values():
-          if '__overwrite' not in doc:
-            non_stomp.append(doc)
-
-        if non_stomp:
-          # It looks like couch has some race conditions where a document
-          # create works, but gives an error anyhow.  we want to go through
-          # and make sure that we're not erroneously raising a creation error
-          non_stomp_ids = [doc['_id'] for doc in non_stomp]
-          dbdocs        = self.get(*non_stomp_ids)
-          false_err     = set()
-
-          for notinserted in non_stomp:
-            key    = notinserted['_id']
-            stored = dbdocs[key]
-            if not stored:
-              # The value just isn't there.  no idea why this insert failed,
-              # but maybe it won't next time around?
-              false_err.add(key)
-            elif doc_equal(stored, notinserted):
-              # The exact value we wanted to write is indeed what is stored.
-              # This shouldn't be a problem at all, so we'll just forget that
-              # it happened.
-              del retry_c[key]
-              false_err.add(key)
-
-          non_stomp_ids = set(non_stomp_ids) - false_err
-          if non_stomp_ids:
-            # At this point, we do have documents we tried to create that were
-            # in the database with different values, so we'll yell about it.
-            raise BatchCommitFailure("Document creation blocked",
-                retry_c, retry_u, retry_d)
-
-      self._creates = retry_c
-      self._updates = retry_u
-      self._deletes = retry_d
-      self.commit(retries-1)
-
-  def _process_updates(self, lresult):
-    """Determine the documents we'll be giving to the save_docs as a result of
-    update functions being applied to existing or new documents.
-    """
-    bulk_insert = []
-    for key, fns in self._updates.items():
-      row = lresult[key]
-      try:
-        doc = row['doc']
-        rev = row['value']['rev']
-      except KeyError, err:
-        print err
-        print row
-        assert 'error' in row
-        # Nothing found, we use an empty dict
-        doc = {}
-        rev = None
-
-      for fn in fns:
-        doc = copy.deepcopy(doc)
-        res = fn(doc)
-        if res:
-          doc = res
-
-      if not doc:
-        continue
-
-      doc['_id'] = row['key']
-      if rev:
-        doc['_rev'] = rev
-
-      bulk_insert.append(doc)
-    return bulk_insert
-
-  def _process_deletes(self, lresult):
-    """Determine the deletion documents we'll be giving to the save_docs
-    function.
-    """
-    bulk_insert = []
-    for key in self._deletes:
-      row = lresult[key]
-      try:
-        rev = row['value']['rev']
-      except KeyError:
-        assert 'error' in row
-        # No need to delete this one...
-        continue
-      doc = {
-          '_id'      : key,
-          '_rev'     : rev,
-          '_deleted' : True,
-          }
-      bulk_insert.append(doc)
-    return bulk_insert
-
-  def _process_creates(self, lresult):
-    """This doesn't actually return any documents, as the creates are
-    unconditionally added to the bulk_insert list in commit().  Instead, it
-    just ensures that the __overwrite create docs have proper '_rev' tags
-    applied.
-    """
-    for key, doc in self._creates.items():
-      if '__overwrite' not in doc:
-        continue
-
-      row = lresult[key]
-      try:
-        rev = row['value']['rev']
-      except KeyError:
-        # It doesn't exist? No problem!
-        continue
-      doc['_rev'] = rev
-    return []
 
 def _fulfill(jobs, key, result):
   """Complete the promises outstanding for the given document key.

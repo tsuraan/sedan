@@ -229,7 +229,39 @@ class TestDelete(BaseTest):
     self.assertReadStat(0)
     self.assertWriteStat(0)
 
-    pp(promise.value())
+    self.assertEqual(promise.value(), {'id':'a','rev':2,'ok':True})
+    self.assertReadStat(1)
+    self.assertWriteStat(1)
+
+    promise = self.batch.get('a')['a']
+    self.assertRaises(ResourceNotFound, promise.value)
+    self.assertReadStat(2)
+    self.assertWriteStat(1)
+
+  def testFailure(self):
+    """Deleting missing docs gives errors"""
+    success = self.batch.delete('a')
+    failure = self.batch.delete('d')
+    self.assertReadStat(0)
+    self.assertWriteStat(0)
+
+    self.assertEqual(success.value(), {'id':'a','rev':2,'ok':True})
+    self.assertRaises(ResourceNotFound, failure.value)
+    self.assertReadStat(1)
+    self.assertWriteStat(1)
+
+    promises = self.batch.get('a', 'd')
+    self.assertRaises(ResourceNotFound, promises['a'].value)
+    self.assertReadStat(2)
+    self.assertWriteStat(1)
+
+    self.assertRaises(ResourceNotFound, promises['d'].value)
+    self.assertReadStat(2)
+    self.assertWriteStat(1)
+
+  def testAfterCreate(self):
+    """Deleting with a create scheduled does the expected thing"""
+    pass
 
 class TestCouchKit(unittest.TestCase):
   def normalize_revision(self, row):

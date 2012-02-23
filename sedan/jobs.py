@@ -83,8 +83,6 @@ class DeleteJob(BatchJob):
       raise BatchJobNeedsDocument
     if not current:
       return None
-    import pprint
-    pprint.pprint(current)
     doc = {
         '_id'      : current['id'],
         '_rev'     : current['value']['rev'],
