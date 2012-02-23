@@ -1,6 +1,8 @@
 """Different jobs that we enqueue into our job queues.  These will generally
 not be needed by the end-user.
 """
+from .exceptions import BatchJobForbidsDocument
+from .exceptions import BatchJobNeedsDocument
 import copy
 
 class BatchJob(object):
@@ -81,9 +83,11 @@ class DeleteJob(BatchJob):
       raise BatchJobNeedsDocument
     if not current:
       return None
+    import pprint
+    pprint.pprint(current)
     doc = {
-        '_id'      : current['_id'],
-        '_rev'     : current['_rev'],
+        '_id'      : current['id'],
+        '_rev'     : current['value']['rev'],
         '_deleted' : True,
         }
     return doc

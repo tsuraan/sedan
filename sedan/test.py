@@ -1,7 +1,9 @@
 from .batch import ResourceNotFound
+from .batch import ResourceConflict
 from .batch import CouchBatch
 
 from couchdbkit.exceptions import BulkSaveError
+from pprint import pprint as pp
 import unittest
 import random
 import copy
@@ -143,11 +145,91 @@ class TestCreate(BaseTest):
     self.assertReadStat(0)
     self.assertWriteStat(1)
 
-    promise = self.batch.get('d')['d']
-    self.assertEqual(self.cleanDoc(promise.value()['doc']),
+    cached = self.batch.get('d')['d']
+    self.assertEqual(self.cleanDoc(cached.value()['doc']),
         {'foo':'bar','bar':'baz'})
+    self.assertReadStat(0)
+    self.assertWriteStat(1)
+
+    fresh = self.batch.get('d', cached=False)['d']
+    self.assertEqual(self.cleanDoc(fresh.value()),
+        cached.value())
     self.assertReadStat(1)
     self.assertWriteStat(1)
+
+  def testConflict(self):
+    conflict = self.batch.create('a', {'foo':'bar'})
+    succeed  = self.batch.create('d', {'bar':'baz'})
+    self.assertReadStat(0)
+    self.assertWriteStat(0)
+
+    self.assertRaises(ResourceConflict, conflict.value)
+    self.assertReadStat(0)
+    self.assertWriteStat(1)
+
+    self.assertEqual(self.cleanDoc(succeed.value()),
+        {'rev':1,'id':'d'})
+    self.assertReadStat(0)
+    self.assertWriteStat(1)
+
+    cached = self.batch.get('d')['d']
+    self.assertEqual(self.cleanDoc(cached.value()['doc']),
+        {'bar':'baz'})
+    self.assertReadStat(0)
+    self.assertWriteStat(1)
+
+    fresh = self.batch.get('d', cached=False)['d']
+    self.assertEqual(self.cleanDoc(fresh.value()),
+        cached.value())
+    self.assertReadStat(1)
+    self.assertWriteStat(1)
+
+  def testConflictInCache(self):
+    """Make sure that when the batch knows about a document it can generate a
+    failure without reading or writing to the database.
+    """
+    result = self.batch.get('a')['a']
+    self.assertEqual(self.cleanDoc(result.value()['doc']), self.a)
+    self.assertReadStat(1)
+    self.assertWriteStat(0)
+
+    conflict = self.batch.create('a', {'foo':'bar'})
+    self.assertReadStat(1)
+    self.assertWriteStat(0)
+
+    self.assertRaises(ResourceConflict, conflict.value)
+    self.assertReadStat(1)
+    self.assertWriteStat(0)
+
+  def testCacheConflictWithSuccess(self):
+    """A mixture of cached conflicts, insert conflicts, and successes works.
+    """
+    result = self.batch.get('a')['a']
+    self.assertEqual(self.cleanDoc(result.value()['doc']), self.a)
+    self.assertReadStat(1)
+    self.assertWriteStat(0)
+
+    cache_conflict = self.batch.create('a', {'foo':'bar'})
+    lazy_conflict  = self.batch.create('b', {'bar':'baz'})
+    success        = self.batch.create('d', {'baz':'thinger'})
+    self.assertReadStat(1)
+    self.assertWriteStat(0)
+
+    self.assertRaises(ResourceConflict, cache_conflict.value)
+    self.assertRaises(ResourceConflict, lazy_conflict.value)
+    self.assertEqual(success.value(), {'id':'d', 'rev':1})
+
+    self.assertReadStat(1)
+    self.assertWriteStat(1)
+
+class TestDelete(BaseTest):
+  def testOne(self):
+    """Deleting a value works"""
+    promise = self.batch.delete('a')
+    self.assertReadStat(0)
+    self.assertWriteStat(0)
+
+    pp(promise.value())
 
 class TestCouchKit(unittest.TestCase):
   def normalize_revision(self, row):
@@ -235,8 +317,19 @@ class TestCouchKit(unittest.TestCase):
            'id':'d',
            'key':'d',
            'value':{'rev':1}}])
+    return
 
+  def testDelete(self):
+    """Document deletion works"""
+    result = self.ck.bulk_save([{'_id':'a','_rev':1,'_deleted':True}])
+    map(self.normalize_revision, result)
+    self.assertEqual(result, [{'rev':2,'ok':True,'id':'a'}])
 
+    result = self.ck.all_docs(keys=['a'], include_docs=True)
+    self.assertEqual(1, len(result))
+
+    for r in result:
+      self.assertEqual(None, r.get('doc'))
 
 class FakeResults(object):
   def __init__(self, results):
@@ -250,7 +343,7 @@ class FakeResults(object):
       yield copy.deepcopy(res)
 
   def __len__(self):
-    return len(self.__results__)
+    return len(self.__results)
 
 class FakeCK(object):
   """This class simulates enough of the couchkit interface to test out our
@@ -325,7 +418,7 @@ class FakeCK(object):
         try:
           found = stored[key]
           del stored[key]
-          results.append({'rev': found['_rev']+1, 'id':key})
+          results.append({'rev': found['_rev']+1, 'id':key, 'ok':True})
           continue
         except KeyError:
           results.append(conflict)

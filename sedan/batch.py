@@ -1,8 +1,12 @@
 """This is the core of our couch wrapper.  The CouchBatch class defined here
 is what end-users can use to efficiently query and update couchdb.
 """
+from couchdbkit.exceptions import ResourceConflict
 from couchdbkit.exceptions import ResourceNotFound
+from couchdbkit.exceptions import BulkSaveError
 from functools             import partial
+from pprint                import pprint as pp
+import copy
 
 from .exceptions import BatchJobNeedsDocument
 from .promise    import Promise
@@ -121,26 +125,26 @@ class CouchBatch(object):
     promises we have outstanding on create, overwrite, update, and delete
     operations.
     """
-    bulk_write  = []
+    bulk_write  = {}
     needcurrent = []
 
     for job in self._writes.values():
       try:
-        bulk_write.append(job.doc())
+        bulk_write[job.docid] = job.doc()
       except BatchJobNeedsDocument:
-        current = self.get(job.docid)
+        current = self.get(job.docid)[job.docid]
         needcurrent.append( (current, job) )
 
     for current, job in needcurrent:
       try:
         value = current.value()
-        bulk_write.append(job.doc(value))
+        bulk_write[job.docid] = job.doc(value)
       except ResourceNotFound, e:
         job.promise._fulfill(DbFailure(e))
 
     try:
       self._stats['write'] += 1
-      results = self.__ck.bulk_save(bulk_write)
+      results = self.__ck.bulk_save(bulk_write.values())
     except BulkSaveError, e:
       results = e.results
 
@@ -148,14 +152,28 @@ class CouchBatch(object):
     for result in results:
       key = result['id']
       job = self._writes[key]
-      if 'error' in results:
+      if 'error' in result:
         if job.can_retry:
           retries.append(job)
           self.forget(job.docid)
         else:
-          job.promise._fulfill(DbFailure(result))
+          job.promise._fulfill(DbFailure(_make_conflict(result)))
       else:
         job.promise._fulfill(DbValue(result))
+        doc = bulk_write[key]
+        if doc.get('_deleted') != True:
+          doc = copy.deepcopy(doc)
+          try:
+            doc['_rev'] = result['rev']
+          except KeyError:
+            pp(result)
+            raise
+          self.__docCache[key] = {
+              'id' : key,
+              'key' : key,
+              'value' : {'rev':result['rev']},
+              'doc' : doc,
+              }
 
     self._writes = dict( (job.docid, job) for job in retries )
     if self._writes:
@@ -203,6 +221,21 @@ class CouchBatch(object):
     promise._fulfill(DbFailure(_make_conflict(key)))
     return promise
 
+  def delete(self, key):
+    """Delete a document.  The promise returned here will contain a dictionary
+    with the keys "rev", "id", and "ok", or it will raise a ResourceNotFound
+    exception.
+
+    @param key  The key of the document to delete.
+    """
+    raise NotImplementedError
+    if key not in self._writes:
+      promise = Promise(self.do_writes)
+      self._writes[key] = DeleteJob(key, promise)
+      return promise
+
+    
+
   def update(self, key, updatefn):
     """Queue up a document update function.  On commit, the document
     associated with given key will be retrieved, and the function will be
@@ -242,23 +275,6 @@ class CouchBatch(object):
       return
 
     self._updates.setdefault(key, []).append(updatefn)
-    self._sanity()
-
-  def delete(self, key):
-    """Queue up a document deletion.
-
-    If the key is already in the creation or update queues, it will be removed
-    from them, as the document is being deleted anyhow.
-
-    @param key  The key of the document to delete
-    """
-    if key in self._creates:
-      del self._creates[key]
-    if key in self._updates:
-      del self._updates[key]
-    if key in self._deletes:
-      return
-    self._deletes.add(key)
     self._sanity()
 
   def commit(self, retries=5):
