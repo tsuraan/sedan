@@ -34,35 +34,43 @@ class CouchBatch(object):
   implemented the more sane optimizations and defined errors for the rest of
   the cases.  The top of this table is the current activity scheduled for the
   key, and the left side is the activity that the user is trying to schedule
-  on top of the existing activity:
+  on top of the existing activity.  When these failures occur, it is the
+  actual method that raises the exception, rather than a returned promise.
+  This should make debugging of complicated batch operations a bit more sane.
+
+  The general reasoning behind these behaviours is the question of whether the
+  user could be relying on the failure of the first action as a signal.  If
+  the first action can fail, and the second action would mask that failure,
+  then the second action is forbidden.
 
              Current Action
   New Action
              | create        | overwrite     | update        | delete
   -----------+---------------+---------------+---------------+----------------
-  create     | New activity  |               |               |
-             | fails with    |               |               |
-             | Resource-     |               |               |
-             | Conflict      |               |               |
+  create     | Create-       | Overwrite-    | Update-       | DeleteScheduled
+             | Scheduled is  | Scheduled is  | Scheduled is  | is immediately
+             | immediately   | immediately   | immediately   | raised
+             | raised        | raised        | raised        |
              |               |               |               |
-  overwrite  | New activity  |               |               |
-             | is scheduled, |               |               |
-             | both promises |               |               |
-             | will succeed  |               |               |
-             | when overwrite|               |               |
-             | runs          |               |               |
+  overwrite  | Create-       | New activity  | Update-       | DeleteScheduled
+             | Scheduled is  | overrides     | Scheduled is  | is immediately
+             | immediately   | existing; both| immediately   | raised
+             | raised        | promises tied | raised        |
+             |               | to new one    |               |
              |               |               |               |
-  update     | Update is     |               |               |
-             | applied to new|               |               |
-             | document; both|               |               |
-             | promises are  |               |               |
-             | dependent on  |               |               |
-             | success of    |               |               |
-             | creation      |               |               |
+  update     | Update is     | Update is     | Both updates  | DeleteScheduled
+             | applied to new| applied to    | joined into   | is immediately
+             | document; both| overwrite doc;| composite;    | raised
+             | promises are  | both promises | both promises |
+             | dependent on  | dependent on  | tied to update|
+             | success of    | update        | success       |
+             | creation      | success       |               |
              |               |               |               |
-  delete     | Fails with    |               |               |
-             | Creation-     |               |               |
-             | Pending       |               |               |
+  delete     | Create-       | Scheduled task| Update-       | DeleteScheduled
+             | Scheduled is  | becomes delete| Scheduled is  | is immediately
+             | immediately   | both promises | immediately   | raised
+             | raised        | tied to delete| raised        |
+             |               | success       |               |
   """
   def __init__(self, couchkit):
     self.__ck = couchkit
