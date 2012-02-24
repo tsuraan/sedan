@@ -14,7 +14,7 @@ from .result     import DbFailure
 from .result     import DbValue
 from .actions    import ReadAction
 from .actions    import CreateAction
-from .actions    import ReplaceAction
+from .actions    import OverwriteAction
 from .actions    import UpdateAction
 from .actions    import DeleteAction
 
@@ -71,6 +71,8 @@ class CouchBatch(object):
              | immediately   | both promises | immediately   | raised
              | raised        | tied to delete| raised        |
              |               | success       |               |
+
+  this logic is enshrined in _set_action far below...
   """
   def __init__(self, couchkit):
     self.__ck = couchkit
@@ -138,7 +140,7 @@ class CouchBatch(object):
 
     notcached = keys - set(result)
     for key in notcached:
-      result[key] = _set_job(self._reads, key, self.do_reads,
+      result[key] = _set_action(self._reads, key, self.do_reads,
           partial(ReadAction, key))
 
     return result
@@ -176,19 +178,19 @@ class CouchBatch(object):
     bulk_write  = {}
     needcurrent = []
 
-    for job in self._writes.values():
+    for action in self._writes.values():
       try:
-        bulk_write[job.docid] = job.doc()
+        bulk_write[action.docid] = action.doc()
       except ActionNeedsDocument:
-        current = self.get(job.docid)[job.docid]
-        needcurrent.append( (current, job) )
+        current = self.get(action.docid)[action.docid]
+        needcurrent.append( (current, action) )
 
-    for current, job in needcurrent:
+    for current, action in needcurrent:
       try:
         value = current.value()
-        bulk_write[job.docid] = job.doc(value)
+        bulk_write[action.docid] = action.doc(value)
       except ResourceNotFound, e:
-        job.promise._fulfill(DbFailure(e))
+        action.promise._fulfill(DbFailure(e))
 
     try:
       self._stats['write'] += 1
@@ -199,15 +201,15 @@ class CouchBatch(object):
     retries = []
     for result in results:
       key = result['id']
-      job = self._writes[key]
+      action = self._writes[key]
       if 'error' in result:
-        if job.can_retry:
-          retries.append(job)
-          self.forget(job.docid)
+        if action.can_retry:
+          retries.append(action)
+          self.forget(action.docid)
         else:
-          job.promise._fulfill(DbFailure(_make_conflict(result)))
+          action.promise._fulfill(DbFailure(_make_conflict(result)))
       else:
-        job.promise._fulfill(DbValue(result))
+        action.promise._fulfill(DbValue(result))
         doc = bulk_write[key]
         if doc.get('_deleted') == True:
           self.forget(key)
@@ -221,13 +223,13 @@ class CouchBatch(object):
               'doc' : doc,
               }
 
-    self._writes = dict( (job.docid, job) for job in retries )
+    self._writes = dict( (action.docid, action) for action in retries )
     if self._writes:
       if retries > 0:
         self.do_writes(retries-1)
       else:
-        for job in self._writes.values():
-          job.promise._fulfill(DbFailure(_make_conflict(job.docid)))
+        for action in self._writes.values():
+          action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
         self._writes = {}
 
     assert self._writes == {}
@@ -256,8 +258,8 @@ class CouchBatch(object):
       if isinstance(self._writes[key], DeleteAction):
         # They wanted to delete before, but now they want to create, so we'll
         # just stomp what was there
-        promise = _set_job(self._writes, key, self.do_writes,
-            partial(ReplaceAction, key, document, None))
+        promise = _set_action(self._writes, key, self.do_writes,
+            partial(OverwriteAction, key, document, None))
         return promise
 
     # We know that the key is either a non-deleting write or is in our cache
@@ -272,8 +274,8 @@ class CouchBatch(object):
     with the keys "rev", "id", and "ok", or it will raise a ResourceNotFound
     exception.
 
-    If there is already a job pending for the given key, that job will be
-    completed with a failure of ResourceNotFound, since it was logically
+    If there is already an action pending for the given key, that action will
+    be completed with a failure of ResourceNotFound, since it was logically
     deleted before it could be created or modified in the database.
 
     @param key  The key of the document to delete.
@@ -314,38 +316,83 @@ class CouchBatch(object):
     @param updatefn The function that will transform the document data
     """
 
-def _fulfill(jobs, key, result):
+def _fulfill(actions, key, result):
   """Complete the promises outstanding for the given document key.
 
-  @param jobs   The key -> Job dictionary for read or write jobs
-  @param key    The couch key for the promise
-  @param result The DbResult to record
+  @param actions  The key -> action dictionary for read or write actions
+  @param key      The couch key for the promise
+  @param result   The DbResult to record
   """
-  if key in jobs:
-    jobs[key].promise._fulfill(result)
-    del jobs[key]
+  if key in actions:
+    actions[key].promise._fulfill(result)
+    del actions[key]
 
-def _set_job(jobs, key, completer_fn, job_fn):
-  """Assign (or re-assign) the job for the given key.  This generates a new
-  Promise chained to the promise of the already-present job for the key (if
-  any).  It then gives that promise to the given job_fn to generate a new Job,
-  which it stores in the jobs dictionary.  The new promise is returned from
-  this function.
+def _set_action(actions, key, completer_fn, action_fn):
+  """Assign (or re-assign) the action for the given key.  This generates a new
+  Promise chained to the promise of the already-present action for the key (if
+  any).  It then gives that promise to the given action_fn to generate a new
+  Action, which it stores in the actions dictionary.  The new promise is
+  returned from this function.
 
-  @param jobs         The dictionary of key -> Job
-  @param key          The key we want to set the job for
+  @param actions      The dictionary of key -> action
+  @param key          The key we want to set the action for
   @param completer_fn The function the promise needs to call when its value is
                       requested
-  @param job_fn       The function that will give us a Job
+  @param action_fn    The function that will give us an Action
   @return             A new promise object to give to the user
   """
   try:
-    prev_promise = jobs[key].promise
+    existing = actions[key]
+    prev_promise = existing.promise
   except KeyError:
+    existing     = None
     prev_promise = None
   
   promise = Promise(completer_fn, prev_promise)
-  jobs[key] = job_fn(promise)
+  new     = action_fn(promise)
+
+  if isinstance(existing, CreateAction):
+    if isinstance(new, CreateAction):
+      raise CreateScheduled
+    elif isinstance(new, OverwriteAction):
+      raise CreateScheduled
+    elif isinstance(new, UpdateAction):
+      # Pass the doc to be created by the existing through the function stored
+      # in the new, wrap the result in a create
+      new = CreateAction(key, new.doc(existing.doc()), promise)
+    elif isinstance(new, DeleteAction):
+      raise CreateScheduled
+  elif isinstance(existing, OverwriteAction):
+    if isinstance(new, CreateAction):
+      raise OverwriteScheduled
+    elif isinstance(new, OverwriteAction):
+      # This will just do the natural thing, which is the new overwrite taking
+      # precedence; the promises are already chained
+      pass
+    elif isinstance(new, UpdateAction):
+      # Similar to above update of a create
+      new = OverwriteAction(key, new.doc(existing.doc()), promise)
+    elif isinstance(new, DeleteAction):
+      # This is the natural action; new is already a delete, and the promises
+      # are already chained
+      pass
+  elif isinstance(existing, UpdateAction):
+    if isinstance(new, CreateAction):
+      raise UpdateScheduled
+    elif isinstance(new, OverwriteAction):
+      raise UpdateScheduled
+    elif isinstance(new, UpdateAction):
+      # Compose the new update function with the existing one, create a new
+      # update action from that
+      composed = lambda doc: new.doc(existing.doc(doc))
+      new = UpdateAction(key, composed, promise)
+    elif isinstance(new, DeleteAction):
+      raise UpdateScheduled
+  elif isinstance(existing, DeleteAction):
+    # The chart for existing = delete is pretty simple...
+    raise DeleteScheduled
+
+  actions[key] = new
   return promise
 
 def _make_conflict(key):

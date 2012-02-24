@@ -52,7 +52,7 @@ class CreateAction(Action):
       raise ActionForbidsDocument
     return self.__doc
 
-class ReplaceAction(Action):
+class OverwriteAction(Action):
   def __init__(self, docid, doc, revision, promise):
     Action.__init__(self, docid, promise, True)
     self.__rev = revision
