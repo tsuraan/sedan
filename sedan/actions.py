@@ -34,6 +34,11 @@ class Action(object):
     The given "current" parameter will be None if we don't know what the
     document is, {} if the document doesn't yet exist in the database, and
     some other dictionary if we just grabbed the doc from the database.
+
+    Implementations of this method may raise exceptions, in which case the
+    caller should fail this action's promise.  They may also return None, in
+    which case the action's promise should succeed with a None, but the
+    database work should just be skipped.
     """
     raise NotImplementedError
 

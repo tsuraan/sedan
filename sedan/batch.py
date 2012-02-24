@@ -180,17 +180,34 @@ class CouchBatch(object):
 
     for action in self._writes.values():
       try:
-        bulk_write[action.docid] = action.doc()
+        doc = action.doc()
       except ActionNeedsDocument:
         current = self.get(action.docid)[action.docid]
         needcurrent.append( (current, action) )
+        continue
+      except Exception, e:
+        action.promise._fulfill(DbFailure(e))
+        doc = None
+
+      if doc:
+        bulk_write[action.docid] = doc
+      else:
+        action.promise._fulfill(DbSuccess(None))
+        del self._writes[doc.docid]
 
     for current, action in needcurrent:
       try:
         value = current.value()
-        bulk_write[action.docid] = action.doc(value)
-      except ResourceNotFound, e:
+        doc = action.doc(value)
+      except Exception, e:
         action.promise._fulfill(DbFailure(e))
+        continue
+
+      if doc:
+        bulk_write[action.docid] = doc
+      else:
+        action.promise._fulfill(DbSuccess(None))
+        del self._writes[action.docid]
 
     try:
       self._stats['write'] += 1
@@ -242,53 +259,35 @@ class CouchBatch(object):
     Create will fail if the document already exists in couch; this means that
     if we have the key in our doc cache, or if the document is scheduled to be
     created already, the returned promise will be a failure.
-    
-    @param key      The key at which to store the given document
-    @param document The data to store (should be a dictionary)
+
+    @param key            The key at which to store the given document
+    @param document       The data to store (should be a dictionary)
+    @raise ScheduleError  If something is already scheduled to happen for this
+                          key
     """
-    if (key not in self._writes) and (key not in self.__docCache):
-      # We know nothing of this key, we we'll queue it up for writing
-      promise = Promise(self.do_writes)
-      self._writes[key] = CreateAction(key, document, promise)
+    if key in self.__docCache:
+      # We know that the key is in our cache, and thus is known to exist.
+      # We'll return a promise that's already set as a failure.
+      promise = Promise(lambda: None)
+      promise._fulfill(DbFailure(_make_conflict(key)))
       return promise
 
-    elif key in self._writes:
-      # We know that we are supposed to be doing something with this key
-      # already; this might not be a failure, however
-      if isinstance(self._writes[key], DeleteAction):
-        # They wanted to delete before, but now they want to create, so we'll
-        # just stomp what was there
-        promise = _set_action(self._writes, key, self.do_writes,
-            partial(OverwriteAction, key, document, None))
-        return promise
-
-    # We know that the key is either a non-deleting write or is in our cache
-    # (thus known to exist).  We'll return a promise that's already set as a
-    # failure.
-    promise = Promise(lambda: None)
-    promise._fulfill(DbFailure(_make_conflict(key)))
+    promise = _set_action(self._writes, key, self.do_writes,
+        partial(CreateAction, key, document))
     return promise
+
 
   def delete(self, key):
     """Delete a document.  The promise returned here will contain a dictionary
     with the keys "rev", "id", and "ok", or it will raise a ResourceNotFound
     exception.
 
-    If there is already an action pending for the given key, that action will
-    be completed with a failure of ResourceNotFound, since it was logically
-    deleted before it could be created or modified in the database.
-
-    @param key  The key of the document to delete.
+    @param key            The key of the document to delete.
+    @raise ScheduleError  If anything other than an overwrite is already
+                          scheduled for this key
     """
-    try:
-      current = self._writes[key]
-    except KeyError:
-      pass
-    else:
-      current.promise._fulfill(DbFailure(ResourceNotFound))
-
-    promise = Promise(self.do_writes)
-    self._writes[key] = DeleteAction(key, promise)
+    promise = _set_action(self._writes, key, self.do_writes,
+        partial(DeleteAction, key))
     return promise
 
 
@@ -296,24 +295,19 @@ class CouchBatch(object):
     """Queue up a document update function.  On commit, the document
     associated with given key will be retrieved, and the function will be
     called on the document.  If the document does not exist in the database,
-    the given function will be given an empty dictionary as its argument.
+    the returned promise's value will raise a ResourceNotFound exception;
+    otherwise, the value will be the update response from the database, which
+    is basically a dictionary with a rev and a key (the key you gave this
+    function, hopefully)
 
     The result of the function will be the new value that will be stored (at
     least, given to the other updates for the document).  If the update
     function returns None, it will have no effect on the stored value of the
     document.
 
-    If the key is already queued for deletion, the updatefn will be
-    immediately called with an empty dicionary.  If the updatefn returns
-    non-None, then the key will be removed from deletion and the returned
-    document will be put in the creation queue as an __overwrite document.
-
-    If the key is queued for creation, the updatefn will be called on the
-    queued doc.  If it returns none-None, the result will replace the one
-    already in the creation queue.
-
-    @param key      The key of the document to update
-    @param updatefn The function that will transform the document data
+    @param key            The key of the document to update
+    @param updatefn       The function that will transform the document data
+    @raise ScheduleError  If there is already a delete scheduled for this key
     """
 
 def _fulfill(actions, key, result):
@@ -357,9 +351,7 @@ def _set_action(actions, key, completer_fn, action_fn):
     elif isinstance(new, OverwriteAction):
       raise CreateScheduled
     elif isinstance(new, UpdateAction):
-      # Pass the doc to be created by the existing through the function stored
-      # in the new, wrap the result in a create
-      new = CreateAction(key, new.doc(existing.doc()), promise)
+      new, promise = _update_doc(new, existing, promise)
     elif isinstance(new, DeleteAction):
       raise CreateScheduled
   elif isinstance(existing, OverwriteAction):
@@ -370,8 +362,7 @@ def _set_action(actions, key, completer_fn, action_fn):
       # precedence; the promises are already chained
       pass
     elif isinstance(new, UpdateAction):
-      # Similar to above update of a create
-      new = OverwriteAction(key, new.doc(existing.doc()), promise)
+      new, promise = _update_doc(new, existing, promise)
     elif isinstance(new, DeleteAction):
       # This is the natural action; new is already a delete, and the promises
       # are already chained
@@ -394,6 +385,35 @@ def _set_action(actions, key, completer_fn, action_fn):
 
   actions[key] = new
   return promise
+
+def _update_doc(new, existing, promise):
+  """Pass the doc to be created by the existing through the function stored in
+  the new, wrap the result in a create.  If the update function throws an
+  exception, we will make a failed promise and throw away the update; if the
+  update function returns None, we will make a successful promise with the
+  value of None and throw away the update
+  """
+  assert isinstance(new, UpdateAction)
+  assert (isinstance(existing, CreateAction) 
+      or isinstance(existing, OverwriteAction) )
+
+  try:
+    updated = new.doc(existing.doc())
+  except Exception, e:
+    new     = existing
+    promise = Promise(lambda: None)
+    promise._fulfill(DbFailure(e))
+  else:
+    if updated:
+      if isinstance(existing, CreateAction):
+        new = CreateAction(existing.docid, updated, promise)
+      else:
+        new = OverwriteAction(existing.docid, updated, None, promise)
+    else:
+      new     = existing
+      promise = Promise(lambda: None)
+      promise._fulfill(DbSuccess(None))
+  return new, promise
 
 def _make_conflict(key):
   """Generate a ResourceConflict exception object for the given key"""
