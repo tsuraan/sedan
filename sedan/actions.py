@@ -1,11 +1,11 @@
 """Different jobs that we enqueue into our job queues.  These will generally
 not be needed by the end-user.
 """
-from .exceptions import BatchJobForbidsDocument
-from .exceptions import BatchJobNeedsDocument
+from .exceptions import ActionForbidsDocument
+from .exceptions import ActionNeedsDocument
 import copy
 
-class BatchJob(object):
+class Action(object):
   """Object representing a job that needs to be done.  Current subclasses of
   this are create, replace, update, and delete jobs.
   """
@@ -37,24 +37,24 @@ class BatchJob(object):
     """
     raise NotImplementedError
 
-class ReadJob(BatchJob):
+class ReadAction(Action):
   def __init__(self, docid, promise):
-    BatchJob.__init__(self, docid, promise, False)
+    Action.__init__(self, docid, promise, False)
 
-class CreateJob(BatchJob):
+class CreateAction(Action):
   def __init__(self, docid, doc, promise):
-    BatchJob.__init__(self, docid, promise, False)
+    Action.__init__(self, docid, promise, False)
     self.__doc = copy.deepcopy(doc)
     self.__doc['_id'] = docid
 
   def doc(self, current=None):
     if current is not None:
-      raise BatchJobForbidsDocument
+      raise ActionForbidsDocument
     return self.__doc
 
-class ReplaceJob(BatchJob):
+class ReplaceAction(Action):
   def __init__(self, docid, doc, revision, promise):
-    BatchJob.__init__(self, docid, promise, True)
+    Action.__init__(self, docid, promise, True)
     self.__rev = revision
     self.__doc = copy.deepcopy(doc)
     self.__doc['_id'] = docid
@@ -64,23 +64,23 @@ class ReplaceJob(BatchJob):
       self.__doc['_rev'] = current['_rev']
     return self.__doc
 
-class UpdateJob(BatchJob):
+class UpdateAction(Action):
   def __init__(self, docid, fn, promise):
-    BatchJob.__init__(self, docid, promise, True)
+    Action.__init__(self, docid, promise, True)
     self.__fn = fn
 
   def doc(self, current=None):
     if current is None:
-      raise BatchJobNeedsDocument
+      raise ActionNeedsDocument
     return self.__fn(current['doc'])
 
-class DeleteJob(BatchJob):
+class DeleteAction(Action):
   def __init__(self, docid, promise):
-    BatchJob.__init__(self, docid, promise, True)
+    Action.__init__(self, docid, promise, True)
 
   def doc(self, current=None):
     if current is None:
-      raise BatchJobNeedsDocument
+      raise ActionNeedsDocument
     if not current:
       return None
     doc = {

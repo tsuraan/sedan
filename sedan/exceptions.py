@@ -17,13 +17,13 @@ class OverwriteScheduled(ScheduleError):
 class DeleteScheduled(ScheduleError):
   """Attempted to layer an illegal action over a delete action."""
 
-class BatchJobNeedsDocument(Exception):
-  """Raised by a batch job's ".doc" method when it is called without a
-  document, and the job needs a document to operate on.
+class ActionNeedsDocument(Exception):
+  """Raised by a batch action's ".doc" method when it is called without a
+  document, and the action needs a document to operate on.
   """
 
-class BatchJobForbidsDocument(Exception):
-  """Raised by a batch job's ".doc" method when it is called with a document,
-  and the batch job needs the document to not exist.
+class ActionForbidsDocument(Exception):
+  """Raised by a batch action's ".doc" method when it is called with a
+  document, and the action needs the document to not exist.
   """
 

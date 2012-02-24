@@ -8,15 +8,15 @@ from functools             import partial
 from pprint                import pprint as pp
 import copy
 
-from .exceptions import BatchJobNeedsDocument
+from .exceptions import ActionNeedsDocument
 from .promise    import Promise
 from .result     import DbFailure
 from .result     import DbValue
-from .jobs       import ReadJob
-from .jobs       import CreateJob
-from .jobs       import ReplaceJob
-from .jobs       import UpdateJob
-from .jobs       import DeleteJob
+from .actions    import ReadAction
+from .actions    import CreateAction
+from .actions    import ReplaceAction
+from .actions    import UpdateAction
+from .actions    import DeleteAction
 
 class CouchBatch(object):
   """An efficient job batcher for CouchDB.  All the database-access functions
@@ -139,7 +139,7 @@ class CouchBatch(object):
     notcached = keys - set(result)
     for key in notcached:
       result[key] = _set_job(self._reads, key, self.do_reads,
-          partial(ReadJob, key))
+          partial(ReadAction, key))
 
     return result
 
@@ -179,7 +179,7 @@ class CouchBatch(object):
     for job in self._writes.values():
       try:
         bulk_write[job.docid] = job.doc()
-      except BatchJobNeedsDocument:
+      except ActionNeedsDocument:
         current = self.get(job.docid)[job.docid]
         needcurrent.append( (current, job) )
 
@@ -247,17 +247,17 @@ class CouchBatch(object):
     if (key not in self._writes) and (key not in self.__docCache):
       # We know nothing of this key, we we'll queue it up for writing
       promise = Promise(self.do_writes)
-      self._writes[key] = CreateJob(key, document, promise)
+      self._writes[key] = CreateAction(key, document, promise)
       return promise
 
     elif key in self._writes:
       # We know that we are supposed to be doing something with this key
       # already; this might not be a failure, however
-      if isinstance(self._writes[key], DeleteJob):
+      if isinstance(self._writes[key], DeleteAction):
         # They wanted to delete before, but now they want to create, so we'll
         # just stomp what was there
         promise = _set_job(self._writes, key, self.do_writes,
-            partial(ReplaceJob, key, document, None))
+            partial(ReplaceAction, key, document, None))
         return promise
 
     # We know that the key is either a non-deleting write or is in our cache
@@ -286,7 +286,7 @@ class CouchBatch(object):
       current.promise._fulfill(DbFailure(ResourceNotFound))
 
     promise = Promise(self.do_writes)
-    self._writes[key] = DeleteJob(key, promise)
+    self._writes[key] = DeleteAction(key, promise)
     return promise
 
 
