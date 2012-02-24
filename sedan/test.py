@@ -259,9 +259,6 @@ class TestDelete(BaseTest):
     self.assertReadStat(2)
     self.assertWriteStat(1)
 
-  def testAfterCreate(self):
-    """Deleting with a create scheduled does the expected thing"""
-    pass
 
 class TestCouchKit(unittest.TestCase):
   def normalize_revision(self, row):
