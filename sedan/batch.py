@@ -309,6 +309,24 @@ class CouchBatch(object):
     @param updatefn       The function that will transform the document data
     @raise ScheduleError  If there is already a delete scheduled for this key
     """
+    promise = _set_action(self._writes, key, self.do_writes,
+        partial(UpdateAction, key, updatefn))
+    return promise
+
+  def overwrite(self, key, document, revision=None):
+    """Stomp over whatever document already exists in the database with the
+    given key, or create a new document if needed.  The data given by document
+    is what will be in the database once we commit.
+
+    @param key            The key at which to store our data
+    @param document       The data to store
+    @param revision       The current database rev of the doc, if known
+    @raise ScheduleError  If there is already an anything scheduled other than
+                          another overwrite.
+    """
+    promise = _set_action(self._writes, key, self.do_writes,
+        partial(OverwriteAction, key, document, revision))
+    return promise
 
 def _fulfill(actions, key, result):
   """Complete the promises outstanding for the given document key.
