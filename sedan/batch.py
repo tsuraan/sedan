@@ -189,19 +189,22 @@ class CouchBatch(object):
 
     for action in self._writes.values():
       try:
-        doc = action.doc()
+        if action.docid in self.__docCache:
+          doc = action.doc(self.__docCache[action.docid])
+        else:
+          doc = action.doc()
       except ActionNeedsDocument:
         current = self.get(action.docid)[action.docid]
         needcurrent.append( (current, action) )
         continue
       except Exception, e:
         action.promise._fulfill(DbFailure(e))
-        doc = None
+        continue
 
       if doc:
         bulk_write[action.docid] = doc
       else:
-        action.promise._fulfill(DbSuccess(None))
+        action.promise._fulfill(DbValue(None))
         del self._writes[doc.docid]
 
     for current, action in needcurrent:
@@ -215,7 +218,7 @@ class CouchBatch(object):
       if doc:
         bulk_write[action.docid] = doc
       else:
-        action.promise._fulfill(DbSuccess(None))
+        action.promise._fulfill(DbValue(None))
         del self._writes[action.docid]
 
     try:
@@ -285,20 +288,20 @@ class CouchBatch(object):
         partial(CreateAction, key, document))
     return promise
 
+  def overwrite(self, key, document, revision=None):
+    """Stomp over whatever document already exists in the database with the
+    given key, or create a new document if needed.  The data given by document
+    is what will be in the database once we commit.
 
-  def delete(self, key):
-    """Delete a document.  The promise returned here will contain a dictionary
-    with the keys "rev", "id", and "ok", or it will raise a ResourceNotFound
-    exception.
-
-    @param key            The key of the document to delete.
-    @raise ScheduleError  If anything other than an overwrite is already
-                          scheduled for this key
+    @param key            The key at which to store our data
+    @param document       The data to store
+    @param revision       The current database rev of the doc, if known
+    @raise ScheduleError  If there is already an anything scheduled other than
+                          another overwrite.
     """
     promise = _set_action(self._writes, key, self.do_writes,
-        partial(DeleteAction, key))
+        partial(OverwriteAction, key, document, revision))
     return promise
-
 
   def update(self, key, updatefn):
     """Queue up a document update function.  On commit, the document
@@ -322,19 +325,17 @@ class CouchBatch(object):
         partial(UpdateAction, key, updatefn))
     return promise
 
-  def overwrite(self, key, document, revision=None):
-    """Stomp over whatever document already exists in the database with the
-    given key, or create a new document if needed.  The data given by document
-    is what will be in the database once we commit.
+  def delete(self, key):
+    """Delete a document.  The promise returned here will contain a dictionary
+    with the keys "rev", "id", and "ok", or it will raise a ResourceNotFound
+    exception.
 
-    @param key            The key at which to store our data
-    @param document       The data to store
-    @param revision       The current database rev of the doc, if known
-    @raise ScheduleError  If there is already an anything scheduled other than
-                          another overwrite.
+    @param key            The key of the document to delete.
+    @raise ScheduleError  If anything other than an overwrite is already
+                          scheduled for this key
     """
     promise = _set_action(self._writes, key, self.do_writes,
-        partial(OverwriteAction, key, document, revision))
+        partial(DeleteAction, key))
     return promise
 
 def _fulfill(actions, key, result):
@@ -402,7 +403,11 @@ def _set_action(actions, key, completer_fn, action_fn):
     elif isinstance(new, UpdateAction):
       # Compose the new update function with the existing one, create a new
       # update action from that
-      composed = lambda doc: new.doc({'doc':existing.doc(doc)})
+      origNew = new
+      def composed(doc):
+        fromExisting = existing.doc({'doc':doc})
+        fromNew = origNew.doc({'doc':fromExisting})
+        return fromNew
       new = UpdateAction(key, composed, promise)
     elif isinstance(new, DeleteAction):
       raise UpdateScheduled
@@ -439,7 +444,7 @@ def _update_doc(new, existing, promise):
     else:
       new     = existing
       promise = Promise(lambda: None)
-      promise._fulfill(DbSuccess(None))
+      promise._fulfill(DbValue(None))
   return new, promise
 
 def _make_conflict(key):

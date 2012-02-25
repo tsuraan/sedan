@@ -124,7 +124,6 @@ class TestGet(BaseTest):
     self.assertEqual(self.c, self.cleanDoc(c1))
     self.assertEqual(self.c, self.cleanDoc(c2))
 
-
   def testMissing(self):
     """Missing data produces ResourceNotFound exceptions"""
     d1 = self.batch.get('a', 'c', 'missing-key')
@@ -217,6 +216,105 @@ class TestCreate(BaseTest):
 
     self.assertStats(read=1, write=1)
 
+class TestOverwrite(BaseTest):
+  def testSquishCached(self):
+    """We stomp over existing values (cached variation)"""
+    p1 = self.batch.get('a')['a']
+    self.assertStats(read=0, write=0)
+    v1 = p1.value()
+    self.assertStats(read=1, write=0)
+    self.assertEqual(self.cleanDoc(v1['doc']), self.a)
+
+    p2 = self.batch.overwrite('a', {'moo':'cow'})
+    self.assertStats(read=1, write=0)
+    p2.value()
+    self.assertStats(read=1, write=1)
+
+    p3 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=1)
+    self.assertEqual(self.cleanDoc(p3.value()['doc']), {'moo':'cow'})
+    self.assertStats(read=1, write=1)
+
+    p4 = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=1, write=1)
+    self.assertEqual(p3.value(), p4.value())
+    self.assertStats(read=2, write=1)
+
+  def testSquishUncached(self):
+    """We stomp over existing values (uncached variation)"""
+    p1 = self.batch.overwrite('a', {'moo':'cow'})
+    self.assertStats(read=0, write=0)
+    p1.value()
+    self.assertStats(read=1, write=2)
+
+    p2 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=2)
+    self.assertEqual(self.cleanDoc(p2.value()['doc']), {'moo':'cow'})
+    self.assertStats(read=1, write=2)
+
+    p3 = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=1, write=2)
+    self.assertEqual(p2.value(), p3.value())
+    self.assertStats(read=2, write=2)
+
+  def testOverwriteNothing(self):
+    """We can overwrite when there is no existing value"""
+    p1 = self.batch.overwrite('d', {'moo':'cow'})
+    self.assertStats(read=0, write=0)
+    p1.value()
+    self.assertStats(read=0, write=1)
+
+    p2 = self.batch.get('d')['d']
+    self.assertStats(read=0, write=1)
+    self.assertEqual(self.cleanDoc(p2.value()['doc']), {'moo':'cow'})
+    self.assertStats(read=0, write=1)
+
+    p3 = self.batch.get('d', cached=False)['d']
+    self.assertStats(read=0, write=1)
+    self.assertEqual(p2.value(), p3.value())
+    self.assertStats(read=1, write=1)
+
+  def testOverwriteCorrectRevision(self):
+    """An overwrite given the correct revision is pretty efficient"""
+    p1 = self.batch.overwrite('a', {'moo':'cow'}, revision=1)
+    self.assertStats(read=0, write=0)
+    p1.value()
+    self.assertStats(read=0, write=1)
+
+    p2 = self.batch.get('a')['a']
+    self.assertStats(read=0, write=1)
+    self.assertEqual(self.cleanDoc(p2.value()['doc']), {'moo':'cow'})
+    self.assertStats(read=0, write=1)
+
+    p3 = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=0, write=1)
+    self.assertEqual(p2.value(), p3.value())
+    self.assertStats(read=1, write=1)
+
+  def testOverwriteWrongRevision(self):
+    """An overwrite given the wrong revision still works"""
+    p1 = self.batch.overwrite('a', {'moo':'cow'}, revision=2)
+    self.assertStats(read=0, write=0)
+    p1.value()
+    self.assertStats(read=1, write=2)
+
+    p2 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=2)
+    self.assertEqual(self.cleanDoc(p2.value()['doc']), {'moo':'cow'})
+    self.assertStats(read=1, write=2)
+
+    p3 = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=1, write=2)
+    self.assertEqual(p2.value(), p3.value())
+    self.assertStats(read=2, write=2)
+
+class TestDelete(BaseTest):
+  def testOne(self):
+    """Deleting a value works"""
+    promise = self.batch.delete('a')
+    self.assertStats(read=0, write=0)
+
+    self.assertEqual(promise.value(), {'id':'a','rev':2,'ok':True})
 class TestDelete(BaseTest):
   def testOne(self):
     """Deleting a value works"""
@@ -287,7 +385,6 @@ class TestOverlaps(BaseTest):
     self.assertEqual(self.cleanDoc(p2.value()['doc']), {'a':1})
     self.assertStats(read=1, write=1)
 
-
   def testCreateUpdate(self):
     """Create followed by Update modified created document"""
     p1 = self.batch.create('d', {'a':1})
@@ -305,7 +402,6 @@ class TestOverlaps(BaseTest):
     self.assertEqual(self.cleanDoc(p3.value()['doc']), {'a':1,'b':2})
     self.assertStats(read=1, write=1)
 
-
   def testCreateDelete(self):
     """Create followed by Delete raises CreateScheduled"""
     p1 = self.batch.create('d', {'a':1})
@@ -320,7 +416,6 @@ class TestOverlaps(BaseTest):
 
     self.assertEqual(self.cleanDoc(p2.value()['doc']), {'a':1})
     self.assertStats(read=1, write=1)
-
 
   def testOverwriteCreate(self):
     """Overwrite followed by Create raises OverwriteScheduled"""
@@ -340,36 +435,207 @@ class TestOverlaps(BaseTest):
 
   def testOverwriteOverwrite(self):
     """Overwrite followed by Overwrite smashes existing overwrite"""
+    p1 = self.batch.overwrite('a', {'moo':'cow'})
+    p2 = self.batch.overwrite('a', {'cow':'furry'})
+    self.assertStats(read=0, write=0)
+
+    v1 = p1.value()
+    self.assertStats(read=1, write=2)
+    v2 = p2.value()
+    self.assertStats(read=1, write=2)
+    self.assertEqual(v1, v2)
+
+    p3 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=2)
+    self.assertEqual(self.cleanDoc(p3.value()['doc']), {'cow':'furry'})
+    self.assertStats(read=1, write=2)
+
+    p4 = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=1, write=2)
+    self.assertEqual(p3.value(), p4.value())
+    self.assertStats(read=2, write=2)
 
   def testOverwriteUpdate(self):
     """Overwrite followed by Update updates overwrite doc"""
+    p1 = self.batch.overwrite('a', {'moo':'cow'})
+    p2 = self.batch.update('a', self.upd({'cow':'furry'}))
+    self.assertStats(read=0, write=0)
+
+    v1 = p1.value()
+    self.assertStats(read=1, write=2)
+    v2 = p2.value()
+    self.assertStats(read=1, write=2)
+    self.assertEqual(v1, v2)
+
+    p3 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=2)
+    self.assertEqual(self.cleanDoc(p3.value()['doc']),
+        {'moo':'cow', 'cow':'furry'})
+    self.assertStats(read=1, write=2)
+
+    p4 = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=1, write=2)
+    self.assertEqual(p3.value(), p4.value())
+    self.assertStats(read=2, write=2)
 
   def testOverwriteDelete(self):
     """Overwrite followed by Delete becomes a delete"""
+    p1 = self.batch.overwrite('a', {'moo':'cow'})
+    p2 = self.batch.delete('a')
+    self.assertStats(read=0, write=0)
+
+    v1 = p1.value()
+    self.assertStats(read=1, write=1)
+    v2 = p2.value()
+    self.assertStats(read=1, write=1)
+    self.assertEqual(v1, v2)
+
+    p3 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=1)
+    self.assertRaises(ResourceNotFound, p3.value)
+    self.assertStats(read=2, write=1)
 
   def testUpdateCreate(self):
     """Update followed by Create raises UpdateScheduled"""
+    p1 = self.batch.update('a', self.upd({'moo':'cow'}))
+    self.assertRaises(UpdateScheduled, self.batch.create, 'a', {'b':'c'})
+    self.assertStats(read=0, write=0)
+
+    p1.value()
+    self.assertStats(read=1, write=1)
+
+    expected = dict(self.a)
+    expected['moo']='cow'
+    p2 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=1)
+    self.assertEqual(self.cleanDoc(p2.value()['doc']), expected)
+    self.assertStats(read=1, write=1)
+
+    p3 = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=1, write=1)
+    self.assertEqual(p2.value(), p3.value())
+    self.assertStats(read=2, write=1)
 
   def testUpdateOverwrite(self):
     """Update followed by Overwrite raises UpdateScheduled"""
+    p1 = self.batch.update('a', self.upd({'moo':'cow'}))
+    self.assertRaises(UpdateScheduled, self.batch.overwrite, 'a', {'b':'c'})
+    self.assertStats(read=0, write=0)
+
+    p1.value()
+    self.assertStats(read=1, write=1)
+
+    expected = dict(self.a)
+    expected['moo']='cow'
+    p2 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=1)
+    self.assertEqual(self.cleanDoc(p2.value()['doc']), expected)
+    self.assertStats(read=1, write=1)
+
+    p3 = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=1, write=1)
+    self.assertEqual(p2.value(), p3.value())
+    self.assertStats(read=2, write=1)
 
   def testUpdateUpdate(self):
     """Update followed by Update creates composite update"""
+    p1 = self.batch.update('a', self.upd({'moo':'cow'}))
+    p2 = self.batch.update('a', self.upd({'cow':'furry'}))
+    self.assertStats(read=0, write=0)
+
+    self.assertEqual(p1.value(), p2.value())
+    self.assertStats(read=1, write=1)
+
+    expected = dict(self.a)
+    expected['moo']='cow'
+    expected['cow']='furry'
+    p3 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=1)
+    self.assertEqual(self.cleanDoc(p3.value()['doc']), expected)
+    self.assertStats(read=1, write=1)
+
+    p4 = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=1, write=1)
+    self.assertEqual(p3.value(), p4.value())
+    self.assertStats(read=2, write=1)
 
   def testUpdateDelete(self):
     """Update followed by Delete raises UpdateScheduled"""
+    p1 = self.batch.update('a', self.upd({'moo':'cow'}))
+    self.assertRaises(UpdateScheduled, self.batch.delete, 'a')
+    self.assertStats(read=0, write=0)
+
+    p1.value()
+    self.assertStats(read=1, write=1)
+
+    expected = dict(self.a)
+    expected['moo']='cow'
+    p2 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=1)
+    self.assertEqual(self.cleanDoc(p2.value()['doc']), expected)
+    self.assertStats(read=1, write=1)
+
+    p3 = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=1, write=1)
+    self.assertEqual(p2.value(), p3.value())
+    self.assertStats(read=2, write=1)
 
   def testDeleteCreate(self):
     """Delete followed by Create raises DeleteScheduled"""
+    p1 = self.batch.delete('a')
+    self.assertRaises(DeleteScheduled, self.batch.create, 'a', {'moo':'cow'})
+    self.assertStats(read=0, write=0)
+
+    p1.value()
+    self.assertStats(read=1, write=1)
+
+    p2 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=1)
+    self.assertRaises(ResourceNotFound, p2.value)
+    self.assertStats(read=2, write=1)
 
   def testDeleteOverwrite(self):
     """Delete followed by Overwrite raises DeleteScheduled"""
+    p1 = self.batch.delete('a')
+    self.assertRaises(DeleteScheduled, self.batch.overwrite, 'a', {'moo':'cow'})
+    self.assertStats(read=0, write=0)
+
+    p1.value()
+    self.assertStats(read=1, write=1)
+
+    p2 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=1)
+    self.assertRaises(ResourceNotFound, p2.value)
+    self.assertStats(read=2, write=1)
 
   def testDeleteUpdate(self):
     """Delete followed by Update raises DeleteScheduled"""
+    p1 = self.batch.delete('a')
+    self.assertRaises(DeleteScheduled, self.batch.update, 'a',
+        self.upd({'moo':'cow'}))
+    self.assertStats(read=0, write=0)
+
+    p1.value()
+    self.assertStats(read=1, write=1)
+
+    p2 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=1)
+    self.assertRaises(ResourceNotFound, p2.value)
+    self.assertStats(read=2, write=1)
 
   def testDeleteDelete(self):
     """Delete followed by Delete raises DeleteScheduled"""
+    p1 = self.batch.delete('a')
+    self.assertRaises(DeleteScheduled, self.batch.delete, 'a')
+    self.assertStats(read=0, write=0)
+
+    p1.value()
+    self.assertStats(read=1, write=1)
+
+    p2 = self.batch.get('a')['a']
+    self.assertStats(read=1, write=1)
+    self.assertRaises(ResourceNotFound, p2.value)
+    self.assertStats(read=2, write=1)
 
 class TestCouchKit(unittest.TestCase):
   def normalize_revision(self, row):
@@ -502,7 +768,6 @@ class FakeCK(object):
       doc['_id']  = key
 
     self.__docs = docs
-
 
   def all_docs(self, keys=None, include_docs=False, skip=0, limit=None):
     if not keys:

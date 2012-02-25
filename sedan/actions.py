@@ -63,6 +63,8 @@ class OverwriteAction(Action):
     self.__rev         = revision
     self.__doc         = copy.deepcopy(doc)
     self.__doc['_id']  = docid
+    if revision:
+      self.__doc['_rev'] = revision
     self.__tried_empty = False
 
   def doc(self, current=None):
