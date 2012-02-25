@@ -315,13 +315,6 @@ class TestDelete(BaseTest):
     self.assertStats(read=0, write=0)
 
     self.assertEqual(promise.value(), {'id':'a','rev':2,'ok':True})
-class TestDelete(BaseTest):
-  def testOne(self):
-    """Deleting a value works"""
-    promise = self.batch.delete('a')
-    self.assertStats(read=0, write=0)
-
-    self.assertEqual(promise.value(), {'id':'a','rev':2,'ok':True})
     self.assertStats(read=1, write=1)
 
     promise = self.batch.get('a')['a']
