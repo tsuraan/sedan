@@ -60,13 +60,18 @@ class CreateAction(Action):
 class OverwriteAction(Action):
   def __init__(self, docid, doc, revision, promise):
     Action.__init__(self, docid, promise, True)
-    self.__rev = revision
-    self.__doc = copy.deepcopy(doc)
-    self.__doc['_id'] = docid
+    self.__rev         = revision
+    self.__doc         = copy.deepcopy(doc)
+    self.__doc['_id']  = docid
+    self.__tried_empty = False
 
   def doc(self, current=None):
     if current:
-      self.__doc['_rev'] = current['_rev']
+      self.__doc['_rev'] = current['value']['rev']
+    elif self.__tried_empty:
+      raise ActionNeedsDocument
+    else:
+      self.__tried_empty = True
     return self.__doc
 
 class UpdateAction(Action):

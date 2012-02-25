@@ -1,5 +1,9 @@
 from .batch import ResourceNotFound
 from .batch import ResourceConflict
+from .batch import CreateScheduled
+from .batch import UpdateScheduled
+from .batch import OverwriteScheduled
+from .batch import DeleteScheduled
 from .batch import CouchBatch
 
 from couchdbkit.exceptions import BulkSaveError
@@ -36,10 +40,16 @@ class BaseTest(unittest.TestCase):
     canned(self)
 
   def assertReadStat(self, num):
-    self.assertEqual(self.batch._stats['read'], num)
+    self.assertStats(read=num)
 
   def assertWriteStat(self, num):
-    self.assertEqual(self.batch._stats['write'], num)
+    self.assertStats(write=num)
+
+  def assertStats(self, read=None, write=None):
+    if read is not None:
+      self.assertEqual(self.batch._stats['read'], read)
+    if write is not None:
+      self.assertEqual(self.batch._stats['write'], write)
 
   def cleanDoc(self, doc):
     return dict( ( key, doc[key] ) for key in doc if not key.startswith('_') )
@@ -138,51 +148,42 @@ class TestCreate(BaseTest):
   def testSuccess(self):
     """Making a single document works"""
     promise = self.batch.create('d', {'foo':'bar','bar':'baz'})
-    self.assertReadStat(0)
-    self.assertWriteStat(0)
+    self.assertStats(read=0, write=0)
 
     self.assertEqual(promise.value(), {'rev':1, 'id':'d'})
-    self.assertReadStat(0)
-    self.assertWriteStat(1)
+    self.assertStats(read=0, write=1)
 
     cached = self.batch.get('d')['d']
     self.assertEqual(self.cleanDoc(cached.value()['doc']),
         {'foo':'bar','bar':'baz'})
-    self.assertReadStat(0)
-    self.assertWriteStat(1)
+    self.assertStats(read=0, write=1)
 
     fresh = self.batch.get('d', cached=False)['d']
     self.assertEqual(self.cleanDoc(fresh.value()),
         cached.value())
-    self.assertReadStat(1)
-    self.assertWriteStat(1)
+    self.assertStats(read=1, write=1)
 
   def testConflict(self):
     conflict = self.batch.create('a', {'foo':'bar'})
     succeed  = self.batch.create('d', {'bar':'baz'})
-    self.assertReadStat(0)
-    self.assertWriteStat(0)
+    self.assertStats(read=0, write=0)
 
     self.assertRaises(ResourceConflict, conflict.value)
-    self.assertReadStat(0)
-    self.assertWriteStat(1)
+    self.assertStats(read=0, write=1)
 
     self.assertEqual(self.cleanDoc(succeed.value()),
         {'rev':1,'id':'d'})
-    self.assertReadStat(0)
-    self.assertWriteStat(1)
+    self.assertStats(read=0, write=1)
 
     cached = self.batch.get('d')['d']
     self.assertEqual(self.cleanDoc(cached.value()['doc']),
         {'bar':'baz'})
-    self.assertReadStat(0)
-    self.assertWriteStat(1)
+    self.assertStats(read=0, write=1)
 
     fresh = self.batch.get('d', cached=False)['d']
     self.assertEqual(self.cleanDoc(fresh.value()),
         cached.value())
-    self.assertReadStat(1)
-    self.assertWriteStat(1)
+    self.assertStats(read=1, write=1)
 
   def testConflictInCache(self):
     """Make sure that when the batch knows about a document it can generate a
@@ -190,75 +191,185 @@ class TestCreate(BaseTest):
     """
     result = self.batch.get('a')['a']
     self.assertEqual(self.cleanDoc(result.value()['doc']), self.a)
-    self.assertReadStat(1)
-    self.assertWriteStat(0)
+    self.assertStats(read=1, write=0)
 
     conflict = self.batch.create('a', {'foo':'bar'})
-    self.assertReadStat(1)
-    self.assertWriteStat(0)
+    self.assertStats(read=1, write=0)
 
     self.assertRaises(ResourceConflict, conflict.value)
-    self.assertReadStat(1)
-    self.assertWriteStat(0)
+    self.assertStats(read=1, write=0)
 
   def testCacheConflictWithSuccess(self):
     """A mixture of cached conflicts, insert conflicts, and successes works.
     """
     result = self.batch.get('a')['a']
     self.assertEqual(self.cleanDoc(result.value()['doc']), self.a)
-    self.assertReadStat(1)
-    self.assertWriteStat(0)
+    self.assertStats(read=1, write=0)
 
     cache_conflict = self.batch.create('a', {'foo':'bar'})
     lazy_conflict  = self.batch.create('b', {'bar':'baz'})
     success        = self.batch.create('d', {'baz':'thinger'})
-    self.assertReadStat(1)
-    self.assertWriteStat(0)
+    self.assertStats(read=1, write=0)
 
     self.assertRaises(ResourceConflict, cache_conflict.value)
     self.assertRaises(ResourceConflict, lazy_conflict.value)
     self.assertEqual(success.value(), {'id':'d', 'rev':1})
 
-    self.assertReadStat(1)
-    self.assertWriteStat(1)
+    self.assertStats(read=1, write=1)
 
 class TestDelete(BaseTest):
   def testOne(self):
     """Deleting a value works"""
     promise = self.batch.delete('a')
-    self.assertReadStat(0)
-    self.assertWriteStat(0)
+    self.assertStats(read=0, write=0)
 
     self.assertEqual(promise.value(), {'id':'a','rev':2,'ok':True})
-    self.assertReadStat(1)
-    self.assertWriteStat(1)
+    self.assertStats(read=1, write=1)
 
     promise = self.batch.get('a')['a']
     self.assertRaises(ResourceNotFound, promise.value)
-    self.assertReadStat(2)
-    self.assertWriteStat(1)
+    self.assertStats(read=2, write=1)
 
   def testFailure(self):
     """Deleting missing docs gives errors"""
     success = self.batch.delete('a')
     failure = self.batch.delete('d')
-    self.assertReadStat(0)
-    self.assertWriteStat(0)
+    self.assertStats(read=0, write=0)
 
     self.assertEqual(success.value(), {'id':'a','rev':2,'ok':True})
     self.assertRaises(ResourceNotFound, failure.value)
-    self.assertReadStat(1)
-    self.assertWriteStat(1)
+    self.assertStats(read=1, write=1)
 
     promises = self.batch.get('a', 'd')
     self.assertRaises(ResourceNotFound, promises['a'].value)
-    self.assertReadStat(2)
-    self.assertWriteStat(1)
+    self.assertStats(read=2, write=1)
 
     self.assertRaises(ResourceNotFound, promises['d'].value)
-    self.assertReadStat(2)
-    self.assertWriteStat(1)
+    self.assertStats(read=2, write=1)
 
+class TestOverlaps(BaseTest):
+  """Test that the document behaviour of scheduling actions over other actions
+  is followed by the code
+  """
+  def upd(self, update):
+    def updater(doc):
+      doc.update(update)
+      return doc
+    return updater
+
+  def testCreateCreate(self):
+    """Create followed by Create raises CreateScheduled"""
+    p1 = self.batch.create('d', {'a':1})
+    self.assertRaises(CreateScheduled, self.batch.create, 'd', {'a':2})
+    self.assertStats(read=0, write=0)
+
+    p1.value()
+    self.assertStats(read=0, write=1)
+
+    p2 = self.batch.get('d', cached=False)['d']
+    self.assertStats(read=0, write=1)
+
+    self.assertEqual(self.cleanDoc(p2.value()['doc']), {'a':1})
+    self.assertStats(read=1, write=1)
+
+  def testCreateOverwrite(self):
+    """Create followed by Overwrite raises CreateScheduled"""
+    p1 = self.batch.create('d', {'a':1})
+    self.assertRaises(CreateScheduled, self.batch.overwrite, 'd', {'a':2})
+    self.assertStats(read=0, write=0)
+
+    p1.value()
+    self.assertStats(read=0, write=1)
+
+    p2 = self.batch.get('d', cached=False)['d']
+    self.assertStats(read=0, write=1)
+
+    self.assertEqual(self.cleanDoc(p2.value()['doc']), {'a':1})
+    self.assertStats(read=1, write=1)
+
+
+  def testCreateUpdate(self):
+    """Create followed by Update modified created document"""
+    p1 = self.batch.create('d', {'a':1})
+    p2 = self.batch.update('d', self.upd({'b':2}))
+    self.assertStats(read=0, write=0)
+
+    v1 = p1.value()
+    v2 = p2.value()
+    self.assertEqual(v1, v2)
+    self.assertStats(read=0, write=1)
+
+    p3 = self.batch.get('d', cached=False)['d']
+    self.assertStats(read=0, write=1)
+
+    self.assertEqual(self.cleanDoc(p3.value()['doc']), {'a':1,'b':2})
+    self.assertStats(read=1, write=1)
+
+
+  def testCreateDelete(self):
+    """Create followed by Delete raises CreateScheduled"""
+    p1 = self.batch.create('d', {'a':1})
+    self.assertRaises(CreateScheduled, self.batch.delete, 'd')
+    self.assertStats(read=0, write=0)
+
+    p1.value()
+    self.assertStats(read=0, write=1)
+
+    p2 = self.batch.get('d', cached=False)['d']
+    self.assertStats(read=0, write=1)
+
+    self.assertEqual(self.cleanDoc(p2.value()['doc']), {'a':1})
+    self.assertStats(read=1, write=1)
+
+
+  def testOverwriteCreate(self):
+    """Overwrite followed by Create raises OverwriteScheduled"""
+    p1 = self.batch.overwrite('a', {'moo':'cow'})
+    self.assertRaises(OverwriteScheduled,
+        self.batch.create, 'a', {'cow':'moo'})
+    self.assertStats(read=0, write=0)
+
+    p1.value()
+    self.assertStats(read=1, write=2)
+
+    p2 = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=1, write=2)
+
+    self.assertEqual(self.cleanDoc(p2.value()['doc']), {'moo':'cow'})
+    self.assertStats(read=2, write=2)
+
+  def testOverwriteOverwrite(self):
+    """Overwrite followed by Overwrite smashes existing overwrite"""
+
+  def testOverwriteUpdate(self):
+    """Overwrite followed by Update updates overwrite doc"""
+
+  def testOverwriteDelete(self):
+    """Overwrite followed by Delete becomes a delete"""
+
+  def testUpdateCreate(self):
+    """Update followed by Create raises UpdateScheduled"""
+
+  def testUpdateOverwrite(self):
+    """Update followed by Overwrite raises UpdateScheduled"""
+
+  def testUpdateUpdate(self):
+    """Update followed by Update creates composite update"""
+
+  def testUpdateDelete(self):
+    """Update followed by Delete raises UpdateScheduled"""
+
+  def testDeleteCreate(self):
+    """Delete followed by Create raises DeleteScheduled"""
+
+  def testDeleteOverwrite(self):
+    """Delete followed by Overwrite raises DeleteScheduled"""
+
+  def testDeleteUpdate(self):
+    """Delete followed by Update raises DeleteScheduled"""
+
+  def testDeleteDelete(self):
+    """Delete followed by Delete raises DeleteScheduled"""
 
 class TestCouchKit(unittest.TestCase):
   def normalize_revision(self, row):

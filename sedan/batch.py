@@ -9,6 +9,10 @@ from pprint                import pprint as pp
 import copy
 
 from .exceptions import ActionNeedsDocument
+from .exceptions import CreateScheduled
+from .exceptions import UpdateScheduled
+from .exceptions import OverwriteScheduled
+from .exceptions import DeleteScheduled
 from .promise    import Promise
 from .result     import DbFailure
 from .result     import DbValue
@@ -127,6 +131,11 @@ class CouchBatch(object):
     keys   = set(keys)
     result = {}
 
+    if set(['cached']).union(kwargs) != set(['cached']):
+      unexpected = list(set(kwargs).difference(['cached']))[0]
+      raise TypeError(
+          "get() got an unexpected keyword argument '%s'" % unexpected)
+
     if kwargs.get('cached', True):
       for key in keys:
         try:
@@ -170,7 +179,7 @@ class CouchBatch(object):
 #            }
 #    return rows
 
-  def do_writes(self, retries=5):
+  def do_writes(self, _retries=5):
     """Run the current batch of write operations.  This will fulfill all the
     promises we have outstanding on create, overwrite, update, and delete
     operations.
@@ -242,8 +251,8 @@ class CouchBatch(object):
 
     self._writes = dict( (action.docid, action) for action in retries )
     if self._writes:
-      if retries > 0:
-        self.do_writes(retries-1)
+      if _retries > 0:
+        self.do_writes(_retries-1)
       else:
         for action in self._writes.values():
           action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
@@ -393,7 +402,7 @@ def _set_action(actions, key, completer_fn, action_fn):
     elif isinstance(new, UpdateAction):
       # Compose the new update function with the existing one, create a new
       # update action from that
-      composed = lambda doc: new.doc(existing.doc(doc))
+      composed = lambda doc: new.doc({'doc':existing.doc(doc)})
       new = UpdateAction(key, composed, promise)
     elif isinstance(new, DeleteAction):
       raise UpdateScheduled
@@ -416,7 +425,7 @@ def _update_doc(new, existing, promise):
       or isinstance(existing, OverwriteAction) )
 
   try:
-    updated = new.doc(existing.doc())
+    updated = new.doc({'doc':existing.doc()})
   except Exception, e:
     new     = existing
     promise = Promise(lambda: None)
