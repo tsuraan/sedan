@@ -21,6 +21,7 @@ from .actions    import CreateAction
 from .actions    import OverwriteAction
 from .actions    import UpdateAction
 from .actions    import DeleteAction
+from .view       import ViewResults
 
 class CouchBatch(object):
   """An efficient job batcher for CouchDB.  All the database-access functions
@@ -154,30 +155,20 @@ class CouchBatch(object):
 
     return result
 
-#  def view(self, vname, **kwargs):
-#    """Run a view.  It can be useful to run a view through the couch batch
-#    rather than directly through the couchkit object because when include_docs
-#    is given, the docs get added to the batch's cache.
-#    @param vname  The name of the view to query
-#    @param kwargs CouchDB view arguments
-#    @return The result of the view
-#    """
-#    rows = self.__ck.view(vname, **kwargs)
-#    self._stats['read'] += 1
-#    if kwargs.get('include_docs'):
-#      for row in rows:
-#        doc = row['doc']
-#        rev = doc['_rev']
-#        did = doc['_id']
-#        if did in self.__docCache:
-#          continue
-#        self.__docCache[did] = {
-#            'doc' : doc,
-#            'id'  : did,
-#            'key' : did,
-#            'value' : {'rev':rev},
-#            }
-#    return rows
+  def view(self, vname, **kwargs):
+    """Run a view.  It can be useful to run a view through the couch batch
+    rather than directly through the couchkit object because when include_docs
+    is given, the docs get added to the batch's cache.
+    @param vname  The name of the view to query
+    @param kwargs CouchDB view arguments
+    @return The result of the view
+    """
+    rows = self.__ck.view(vname, **kwargs)
+    self._stats['read'] += 1
+    if kwargs.get('include_docs'):
+      return ViewResults(rows, self.__docCache)
+    else:
+      return rows
 
   def do_writes(self, _retries=5):
     """Run the current batch of write operations.  This will fulfill all the
