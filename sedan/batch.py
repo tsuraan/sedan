@@ -108,7 +108,7 @@ class CouchBatch(object):
 
     for row in results:
       key = row['key']
-      if 'doc' in row and row['doc']:
+      if row.get('doc'):
         _fulfill(self._reads, key, DbValue(row))
         self.__docCache[key] = row
       elif (row.get('error') == 'not_found') or (
