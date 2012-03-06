@@ -107,10 +107,11 @@ class CouchBatch(object):
 
     for row in results:
       key = row['key']
-      if 'doc' in row:
+      if 'doc' in row and row['doc']:
         _fulfill(self._reads, key, DbValue(row))
         self.__docCache[key] = row
-      elif row.get('error') == 'not_found':
+      elif (row.get('error') == 'not_found') or (
+          row.get('value', {}).get('deleted')):
         _fulfill(self._reads, key, DbFailure(ResourceNotFound(row)))
       else:
         raise RuntimeError("Unknown couch error type: %s" % row)

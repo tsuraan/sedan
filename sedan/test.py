@@ -8,35 +8,75 @@ from .batch import CouchBatch
 
 from couchdbkit.exceptions import BulkSaveError
 from pprint import pprint as pp
+import couchdbkit
 import unittest
+import numbers
 import random
 import copy
+import sys
 
-def canned(testCase):
-  testCase.a = {
-      'alpha' : 1,
-      'beta'  : 2,
-      }
-  testCase.b = {
-      'alpha' : 2,
-      'beta'  : 3,
-      'gamma' : 4,
-      }
-  testCase.c = {
-      'alpha' : 3,
-      'beta'  : 1,
-      'delta' : 'hi there',
-      }
+if '--real-couch' in sys.argv:
+  print 'using real couch'
+  sys.argv.remove('--real-couch')
+  print sys.argv
+  def canned(testCase):
+    testCase.a = {
+        'alpha' : 1,
+        'beta'  : 2,
+        }
+    testCase.b = {
+        'alpha' : 2,
+        'beta'  : 3,
+        'gamma' : 4,
+        }
+    testCase.c = {
+        'alpha' : 3,
+        'beta'  : 1,
+        'delta' : 'hi there',
+        }
 
-  testCase.ck = FakeCK(docs={
-    'a' : copy.deepcopy(testCase.a),
-    'b' : copy.deepcopy(testCase.b),
-    'c' : copy.deepcopy(testCase.c),
-    })
-  testCase.batch = CouchBatch(testCase.ck)
+    testCase.ck = couchdbkit.Server().create_db('testdb')
+    acopy = copy.deepcopy(testCase.a)
+    testCase.ck['a'] = acopy
+    testCase.ck['b'] = copy.deepcopy(testCase.b)
+    testCase.ck['c'] = copy.deepcopy(testCase.c)
+    testCase.batch = CouchBatch(testCase.ck)
+    testCase.a_rev = acopy['_rev']
+
+  def teardown(testCase):
+    couchdbkit.Server().delete_db('testdb')
+
+else:
+  def canned(testCase):
+    testCase.a = {
+        'alpha' : 1,
+        'beta'  : 2,
+        }
+    testCase.a_rev = 1
+    testCase.b = {
+        'alpha' : 2,
+        'beta'  : 3,
+        'gamma' : 4,
+        }
+    testCase.c = {
+        'alpha' : 3,
+        'beta'  : 1,
+        'delta' : 'hi there',
+        }
+
+    testCase.ck = FakeCK(docs={
+      'a' : copy.deepcopy(testCase.a),
+      'b' : copy.deepcopy(testCase.b),
+      'c' : copy.deepcopy(testCase.c),
+      })
+    testCase.batch = CouchBatch(testCase.ck)
+
+  def teardown(testCase):
+    pass
 
 class BaseTest(unittest.TestCase):
   def setUp(self):
+    self.addCleanup(teardown, self)
     canned(self)
 
   def assertReadStat(self, num):
@@ -53,6 +93,26 @@ class BaseTest(unittest.TestCase):
 
   def cleanDoc(self, doc):
     return dict( ( key, doc[key] ) for key in doc if not key.startswith('_') )
+
+  def nextRev(self, currev):
+    if isinstance(currev, numbers.Integral):
+      return currev+1
+    elif isinstance(currev, basestring):
+      first, rest = currev.split('-', 1)
+      return str(int(first)+1) + '-' + rest
+    else:
+      raise ValueError("Cannot get next for %s of type %s" % (currev,
+        type(currev)))
+
+  def normalize_revision(self, row):
+    if isinstance(row.get('value',{}).get('rev'), basestring):
+      row['value']['rev'] = int(row['value']['rev'].split('-')[0])
+    if isinstance(row.get('rev'), basestring):
+      row['rev'] = int(row['rev'].split('-')[0])
+    if isinstance(row.get('doc',{}).get('_rev'), basestring):
+      row['doc']['_rev'] = int(row['doc']['_rev'].split('-')[0])
+
+    return row
 
 class TestGet(BaseTest):
   def testSingle(self):
@@ -149,7 +209,9 @@ class TestCreate(BaseTest):
     promise = self.batch.create('d', {'foo':'bar','bar':'baz'})
     self.assertStats(read=0, write=0)
 
-    self.assertEqual(promise.value(), {'rev':1, 'id':'d'})
+    self.assertEqual(
+        self.normalize_revision(promise.value()),
+        {'rev':1, 'id':'d'})
     self.assertStats(read=0, write=1)
 
     cached = self.batch.get('d')['d']
@@ -170,7 +232,8 @@ class TestCreate(BaseTest):
     self.assertRaises(ResourceConflict, conflict.value)
     self.assertStats(read=0, write=1)
 
-    self.assertEqual(self.cleanDoc(succeed.value()),
+    self.assertEqual(
+        self.cleanDoc(self.normalize_revision(succeed.value())),
         {'rev':1,'id':'d'})
     self.assertStats(read=0, write=1)
 
@@ -212,7 +275,9 @@ class TestCreate(BaseTest):
 
     self.assertRaises(ResourceConflict, cache_conflict.value)
     self.assertRaises(ResourceConflict, lazy_conflict.value)
-    self.assertEqual(success.value(), {'id':'d', 'rev':1})
+    self.assertEqual(
+        self.normalize_revision(success.value()),
+        {'id':'d', 'rev':1})
 
     self.assertStats(read=1, write=1)
 
@@ -276,7 +341,7 @@ class TestOverwrite(BaseTest):
 
   def testOverwriteCorrectRevision(self):
     """An overwrite given the correct revision is pretty efficient"""
-    p1 = self.batch.overwrite('a', {'moo':'cow'}, revision=1)
+    p1 = self.batch.overwrite('a', {'moo':'cow'}, revision=self.a_rev)
     self.assertStats(read=0, write=0)
     p1.value()
     self.assertStats(read=0, write=1)
@@ -293,7 +358,8 @@ class TestOverwrite(BaseTest):
 
   def testOverwriteWrongRevision(self):
     """An overwrite given the wrong revision still works"""
-    p1 = self.batch.overwrite('a', {'moo':'cow'}, revision=2)
+    p1 = self.batch.overwrite('a', {'moo':'cow'},
+        revision=self.nextRev(self.a_rev))
     self.assertStats(read=0, write=0)
     p1.value()
     self.assertStats(read=1, write=2)
@@ -314,7 +380,9 @@ class TestDelete(BaseTest):
     promise = self.batch.delete('a')
     self.assertStats(read=0, write=0)
 
-    self.assertEqual(promise.value(), {'id':'a','rev':2,'ok':True})
+    self.assertEqual(
+        self.normalize_revision(promise.value()),
+        {'id':'a','rev':2})
     self.assertStats(read=1, write=1)
 
     promise = self.batch.get('a')['a']
@@ -327,7 +395,9 @@ class TestDelete(BaseTest):
     failure = self.batch.delete('d')
     self.assertStats(read=0, write=0)
 
-    self.assertEqual(success.value(), {'id':'a','rev':2,'ok':True})
+    self.assertEqual(
+        self.normalize_revision(success.value()),
+        {'id':'a','rev':2})
     self.assertRaises(ResourceNotFound, failure.value)
     self.assertStats(read=1, write=1)
 
@@ -630,18 +700,7 @@ class TestOverlaps(BaseTest):
     self.assertRaises(ResourceNotFound, p2.value)
     self.assertStats(read=2, write=1)
 
-class TestCouchKit(unittest.TestCase):
-  def normalize_revision(self, row):
-    if isinstance(row.get('value',{}).get('rev'), basestring):
-      row['value']['rev'] = int(row['value']['rev'].split('-')[0])
-    if isinstance(row.get('rev'), basestring):
-      row['rev'] = int(row['rev'].split('-')[0])
-    if isinstance(row.get('doc',{}).get('_rev'), basestring):
-      row['doc']['_rev'] = int(row['doc']['_rev'].split('-')[0])
-
-  def setUp(self):
-    canned(self)
-
+class TestCouchKit(BaseTest):
   def testGet(self):
     """Simple get works"""
     result = sorted(self.ck.all_docs(keys=['a','c']).all())
@@ -720,9 +779,9 @@ class TestCouchKit(unittest.TestCase):
 
   def testDelete(self):
     """Document deletion works"""
-    result = self.ck.bulk_save([{'_id':'a','_rev':1,'_deleted':True}])
+    result = self.ck.bulk_save([{'_id':'a','_rev':self.a_rev,'_deleted':True}])
     map(self.normalize_revision, result)
-    self.assertEqual(result, [{'rev':2,'ok':True,'id':'a'}])
+    self.assertEqual(result, [{'rev':2,'id':'a'}])
 
     result = self.ck.all_docs(keys=['a'], include_docs=True)
     self.assertEqual(1, len(result))
@@ -816,7 +875,7 @@ class FakeCK(object):
         try:
           found = stored[key]
           del stored[key]
-          results.append({'rev': found['_rev']+1, 'id':key, 'ok':True})
+          results.append({'rev': found['_rev']+1, 'id':key})
           continue
         except KeyError:
           results.append(conflict)
@@ -839,5 +898,6 @@ class FakeCK(object):
     return ''.join(chr(random.randint(0,255)) for _ in range(16)).encode('hex')
 
 if __name__ == "__main__":
+
   unittest.main()
 
