@@ -56,15 +56,14 @@ class CreateAction(Action):
 
   @property
   def can_retry(self):
-    print 'testing for can_retry; giving', bool(self.resolver)
     return bool(self.resolver)
 
   def doc(self, current=None):
     if current is not None:
-      print 'got current'
       if not self.resolver:
         raise ActionForbidsDocument
-      resolved = self.resolver(copy.deepcopy(self.__doc), current)
+      resolved = self.resolver(copy.deepcopy(self.__doc),
+          copy.deepcopy(current['doc']))
       if resolved:
         self.__doc = resolved
       else:

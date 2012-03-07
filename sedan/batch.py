@@ -215,6 +215,15 @@ class CouchBatch(object):
         continue
 
       if doc:
+        if doc['_id'] != action.docid:
+          assert isinstance(action, CreateAction)
+          del self._writes[action.docid]
+          if doc['_id'] in self._writes:
+            action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
+            continue
+          action = CreateAction(doc['_id'], doc,
+              action.promise, action.resolver)
+          self._writes[doc['_id']] = action
         bulk_write[action.docid] = doc
       else:
         action.promise._fulfill(DbValue(None))
