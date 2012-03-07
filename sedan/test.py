@@ -284,17 +284,21 @@ class TestCreate(BaseTest):
   def testConflictFn(self):
     """Conflict resolution function works"""
     def resolver(trying, existing):
-      trying['_id'] = 'd'
+      trying['_id'] = chr(ord(trying['_id'])+1)
       return trying
 
     self.batch.create('a', {'foo':'bar'}, resolver).value()
-    self.assertStats(read=1, write=2)
-    ps = self.batch.get('a', 'd', cached=False)
-    self.assertStats(read=1, write=2)
+    self.assertStats(read=3, write=6)
+    ps = self.batch.get('a', 'b', 'c', 'd', cached=False)
+    self.assertStats(read=3, write=6)
     self.assertEqual(self.cleanDoc(ps['a'].value()['doc']), self.a)
-    self.assertStats(read=2, write=2)
+    self.assertStats(read=4, write=6)
+    self.assertEqual(self.cleanDoc(ps['b'].value()['doc']), self.b)
+    self.assertStats(read=4, write=6)
+    self.assertEqual(self.cleanDoc(ps['c'].value()['doc']), self.c)
+    self.assertStats(read=4, write=6)
     self.assertEqual(self.cleanDoc(ps['d'].value()['doc']), {'foo':'bar'})
-    self.assertStats(read=2, write=2)
+    self.assertStats(read=4, write=6)
 
 class TestOverwrite(BaseTest):
   def testSquishCached(self):
