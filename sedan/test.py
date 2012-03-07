@@ -281,6 +281,15 @@ class TestCreate(BaseTest):
 
     self.assertStats(read=1, write=1)
 
+  def testConflictFn(self):
+    """Conflict resolution function works"""
+    def resolver(trying, existing):
+      from pprint import pprint as pp
+      pp(trying)
+      pp(existing)
+
+    self.batch.create('a', {'foo':'bar'}, resolver).value()
+
 class TestOverwrite(BaseTest):
   def testSquishCached(self):
     """We stomp over existing values (cached variation)"""

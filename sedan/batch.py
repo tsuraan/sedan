@@ -8,6 +8,7 @@ from functools             import partial
 from pprint                import pprint as pp
 import copy
 
+from .exceptions import ActionForbidsDocument
 from .exceptions import ActionNeedsDocument
 from .exceptions import CreateScheduled
 from .exceptions import UpdateScheduled
@@ -189,6 +190,9 @@ class CouchBatch(object):
         current = self.get(action.docid)[action.docid]
         needcurrent.append( (current, action) )
         continue
+      except ActionForbidsDocument:
+        action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
+        continue
       except Exception, e:
         action.promise._fulfill(DbFailure(e))
         continue
@@ -203,6 +207,9 @@ class CouchBatch(object):
       try:
         value = current.value()
         doc = action.doc(value)
+      except ActionForbidsDocument:
+        action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
+        continue
       except Exception, e:
         action.promise._fulfill(DbFailure(e))
         continue
@@ -255,7 +262,7 @@ class CouchBatch(object):
 
     assert self._writes == {}
 
-  def create(self, key, document):
+  def create(self, key, document, conflict_fn=None, converter=None):
     """Create a new document.  The promise returned from this will have a
     value that either raises an exception or returns a dictionary with the
     keys "rev" and "id".
@@ -276,8 +283,13 @@ class CouchBatch(object):
       promise._fulfill(DbFailure(_make_conflict(key)))
       return promise
 
-    promise = _set_action(self._writes, key, self.do_writes,
-        partial(CreateAction, key, document))
+    def action_fn(promise):
+      return CreateAction(key,
+          document,
+          promise,
+          conflict_resolver=conflict_fn)
+
+    promise = _set_action(self._writes, key, self.do_writes, action_fn)
     return promise
 
   def overwrite(self, key, document, revision=None):
@@ -430,7 +442,7 @@ def _update_doc(new, existing, promise):
   else:
     if updated:
       if isinstance(existing, CreateAction):
-        new = CreateAction(existing.docid, updated, promise)
+        new = CreateAction(existing.docid, updated, promise, existing.resolver)
       else:
         new = OverwriteAction(existing.docid, updated, None, promise)
     else:

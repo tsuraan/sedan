@@ -47,14 +47,32 @@ class ReadAction(Action):
     Action.__init__(self, docid, promise, False)
 
 class CreateAction(Action):
-  def __init__(self, docid, doc, promise):
+  def __init__(self, docid, doc, promise, conflict_resolver=None):
     Action.__init__(self, docid, promise, False)
-    self.__doc = copy.deepcopy(doc)
+    self.__doc        = copy.deepcopy(doc)
     self.__doc['_id'] = docid
+    self.resolver   = conflict_resolver
+    self.__tried_empty = False
+
+  @property
+  def can_retry(self):
+    print 'testing for can_retry; giving', bool(self.resolver)
+    return bool(self.resolver)
 
   def doc(self, current=None):
     if current is not None:
-      raise ActionForbidsDocument
+      print 'got current'
+      if not self.resolver:
+        raise ActionForbidsDocument
+      resolved = self.resolver(copy.deepcopy(self.__doc), current)
+      if resolved:
+        self.__doc = resolved
+      else:
+        raise ActionForbidsDocument
+    elif self.__tried_empty:
+      raise ActionNeedsDocument
+    else:
+      self.__tried_empty = True
     return self.__doc
 
 class OverwriteAction(Action):
