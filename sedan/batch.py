@@ -7,6 +7,7 @@ from couchdbkit.exceptions import BulkSaveError
 from functools             import partial
 from pprint                import pprint as pp
 import copy
+import time
 
 from .exceptions import ActionForbidsDocument
 from .exceptions import ActionNeedsDocument
@@ -84,6 +85,16 @@ class CouchBatch(object):
     self.__ck = couchkit
     self.clear_cache()
     self._reset()
+
+  def new_batch(self):
+    """Create a new batch that shares this batch's couch connection, but
+    nothing else.  This may be useful when a function passed to this batch's
+    update or create methods needs to do some database work, since using this
+    batch from a callback would almost certainly break things.
+
+    @return A new CouchBatch instance, sharing this batch's couch connection
+    """
+    return CouchBatch(self.__ck)
 
   def clear_cache(self):
     self.__docCache = {}
@@ -172,104 +183,112 @@ class CouchBatch(object):
     else:
       return rows
 
-  def do_writes(self, _retries=5):
+  def do_writes(self, timelimit=5):
     """Run the current batch of write operations.  This will fulfill all the
     promises we have outstanding on create, overwrite, update, and delete
     operations.
+
+    @param timelimit  How many seconds we have to complete; any commit attempts
+                      made after timelimit will be marked as failures
     """
-    bulk_write  = {}
-    needcurrent = []
+    writes       = self._writes
+    self._writes = {}
+    start        = time.time()
 
-    for action in self._writes.values():
-      try:
-        if action.docid in self.__docCache:
-          doc = action.doc(self.__docCache[action.docid])
-        else:
-          doc = action.doc()
-      except ActionNeedsDocument:
-        current = self.get(action.docid)[action.docid]
-        needcurrent.append( (current, action) )
-        continue
-      except ActionForbidsDocument:
-        action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
-        continue
-      except Exception, e:
-        action.promise._fulfill(DbFailure(e))
-        continue
+    while True:
+      if not writes:
+        break
+      if time.time() > start + timelimit:
+        break
 
-      if doc:
-        bulk_write[action.docid] = doc
-      else:
-        action.promise._fulfill(DbValue(None))
-        del self._writes[doc.docid]
+      bulk_write  = {}
+      needcurrent = []
 
-    for current, action in needcurrent:
-      try:
-        value = current.value()
-        doc = action.doc(value)
-      except ActionForbidsDocument:
-        action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
-        continue
-      except Exception, e:
-        action.promise._fulfill(DbFailure(e))
-        continue
-
-      if doc:
-        if doc['_id'] != action.docid:
-          assert isinstance(action, CreateAction)
-          del self._writes[action.docid]
-          if doc['_id'] in self._writes:
-            action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
-            continue
-          action = CreateAction(doc['_id'], doc,
-              action.promise, action.resolver)
-          self._writes[doc['_id']] = action
-        bulk_write[action.docid] = doc
-      else:
-        action.promise._fulfill(DbValue(None))
-        del self._writes[action.docid]
-
-    try:
-      self._stats['write'] += 1
-      results = self.__ck.bulk_save(bulk_write.values())
-    except BulkSaveError, e:
-      results = e.results
-
-    retries = []
-    for result in results:
-      key = result['id']
-      action = self._writes[key]
-      if 'error' in result:
-        if action.can_retry:
-          retries.append(action)
-          self.forget(action.docid)
-        else:
-          action.promise._fulfill(DbFailure(_make_conflict(result)))
-      else:
-        action.promise._fulfill(DbValue(result))
-        doc = bulk_write[key]
-        if doc.get('_deleted') == True:
-          self.forget(key)
-        else:
-          doc = copy.deepcopy(doc)
-          doc['_rev'] = result['rev']
-          self.__docCache[key] = {
-              'id' : key,
-              'key' : key,
-              'value' : {'rev':result['rev']},
-              'doc' : doc,
-              }
-
-    self._writes = dict( (action.docid, action) for action in retries )
-    if self._writes:
-      if _retries > 0:
-        self.do_writes(_retries-1)
-      else:
-        for action in self._writes.values():
+      for action in writes.values():
+        try:
+          if action.docid in self.__docCache:
+            doc = action.doc(self.__docCache[action.docid])
+          else:
+            doc = action.doc()
+        except ActionNeedsDocument:
+          current = self.get(action.docid)[action.docid]
+          needcurrent.append( (current, action) )
+          continue
+        except ActionForbidsDocument:
           action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
-        self._writes = {}
+          continue
+        except Exception, e:
+          action.promise._fulfill(DbFailure(e))
+          continue
 
-    assert self._writes == {}
+        if doc:
+          bulk_write[action.docid] = doc
+        else:
+          action.promise._fulfill(DbValue(None))
+          del writes[doc.docid]
+
+      for current, action in needcurrent:
+        try:
+          value = current.value()
+          doc = action.doc(value)
+        except ActionForbidsDocument:
+          action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
+          continue
+        except Exception, e:
+          action.promise._fulfill(DbFailure(e))
+          continue
+
+        if doc:
+          if doc['_id'] != action.docid:
+            assert isinstance(action, CreateAction)
+            del writes[action.docid]
+            if doc['_id'] in writes:
+              action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
+              continue
+            action = CreateAction(doc['_id'], doc,
+                action.promise, action.resolver)
+            writes[doc['_id']] = action
+          bulk_write[action.docid] = doc
+        else:
+          action.promise._fulfill(DbValue(None))
+          del writes[action.docid]
+
+      try:
+        self._stats['write'] += 1
+        results = self.__ck.bulk_save(bulk_write.values())
+      except BulkSaveError, e:
+        results = e.results
+
+      retries = []
+      for result in results:
+        key = result['id']
+        action = writes[key]
+        if 'error' in result:
+          if action.can_retry:
+            retries.append(action)
+            self.forget(action.docid)
+          else:
+            action.promise._fulfill(DbFailure(_make_conflict(result)))
+        else:
+          action.promise._fulfill(DbValue(result))
+          doc = bulk_write[key]
+          if doc.get('_deleted') == True:
+            self.forget(key)
+          else:
+            doc = copy.deepcopy(doc)
+            doc['_rev'] = result['rev']
+            self.__docCache[key] = {
+                'id' : key,
+                'key' : key,
+                'value' : {'rev':result['rev']},
+                'doc' : doc,
+                }
+
+      writes = dict( (action.docid, action) for action in retries )
+
+    if writes:
+      for action in writes.values():
+        action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
 
   def create(self, key, document, conflict_fn=None, converter=None):
     """Create a new document.  The promise returned from this will have a
