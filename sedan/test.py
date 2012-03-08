@@ -206,17 +206,23 @@ class TestGet(BaseTest):
 class TestCreate(BaseTest):
   def testSuccess(self):
     """Making a single document works"""
-    promise = self.batch.create('d', {'foo':'bar','bar':'baz'})
+    def converter(promise):
+      dct = promise.value()
+      dct['newkey'] = 'newval'
+      return dct
+
+    promise = self.batch.create('d', {'foo':'bar','bar':'baz'},
+        converter=converter)
     self.assertStats(read=0, write=0)
 
     self.assertEqual(
         self.normalize_revision(promise.value()),
-        {'rev':1, 'id':'d'})
+        {'rev':1, 'id':'d', 'newkey':'newval'}) # newkey written by converter
     self.assertStats(read=0, write=1)
 
     cached = self.batch.get('d')['d']
     self.assertEqual(self.cleanDoc(cached.value()['doc']),
-        {'foo':'bar','bar':'baz'})
+        {'foo':'bar','bar':'baz'}) # newkey not actually stored in doc
     self.assertStats(read=0, write=1)
 
     fresh = self.batch.get('d', cached=False)['d']
@@ -299,6 +305,19 @@ class TestCreate(BaseTest):
     self.assertStats(read=4, write=6)
     self.assertEqual(self.cleanDoc(ps['d'].value()['doc']), {'foo':'bar'})
     self.assertStats(read=4, write=6)
+
+  def testConflictOverwrite(self):
+    """The result of a conflict resolver can result in an overwrite"""
+    def resolver(trying, existing):
+      trying['_rev'] = existing['_rev']
+      return trying
+
+    self.batch.create('a', {'foo':'bar'}, resolver).value()
+    self.assertStats(read=1, write=2)
+    pa = self.batch.get('a', cached=False)['a']
+    self.assertStats(read=1, write=2)
+    self.assertEqual(self.cleanDoc(pa.value()['doc']), {'foo':'bar'})
+    self.assertStats(read=2, write=2)
 
 class TestOverwrite(BaseTest):
   def testSquishCached(self):

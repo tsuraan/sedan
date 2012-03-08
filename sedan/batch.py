@@ -164,7 +164,7 @@ class CouchBatch(object):
     notcached = keys - set(result)
     for key in notcached:
       result[key] = _set_action(self._reads, key, self.do_reads,
-          partial(ReadAction, key))
+          partial(ReadAction, key), None)
 
     return result
 
@@ -304,13 +304,22 @@ class CouchBatch(object):
 
     @param key            The key at which to store the given document
     @param document       The data to store (should be a dictionary)
+    @param conflict_fn    A function that accepts the document we're trying to
+                          write and the currently-stored document, and which
+                          can return a new document to try writing or None to
+                          indicate a failure
+    @param converter      A function that, once the promise is given a value,
+                          will immediately be called with that promise. If it
+                          returns a truthy value, that value will be used as
+                          the promise's value instead of whatever it would
+                          have had.
     @raise ScheduleError  If something is already scheduled to happen for this
                           key
     """
     if key in self.__docCache:
       # We know that the key is in our cache, and thus is known to exist.
       # We'll return a promise that's already set as a failure.
-      promise = Promise(lambda: None)
+      promise = Promise(lambda: None, gotresult_fn=converter)
       promise._fulfill(DbFailure(_make_conflict(key)))
       return promise
 
@@ -320,10 +329,11 @@ class CouchBatch(object):
           promise,
           conflict_resolver=conflict_fn)
 
-    promise = _set_action(self._writes, key, self.do_writes, action_fn)
+    promise = _set_action(self._writes, key, self.do_writes, action_fn,
+        converter)
     return promise
 
-  def overwrite(self, key, document, revision=None):
+  def overwrite(self, key, document, revision=None, converter=None):
     """Stomp over whatever document already exists in the database with the
     given key, or create a new document if needed.  The data given by document
     is what will be in the database once we commit.
@@ -331,14 +341,19 @@ class CouchBatch(object):
     @param key            The key at which to store our data
     @param document       The data to store
     @param revision       The current database rev of the doc, if known
+    @param converter      A function that, once the promise is given a value,
+                          will immediately be called with that promise. If it
+                          returns a truthy value, that value will be used as
+                          the promise's value instead of whatever it would
+                          have had.
     @raise ScheduleError  If there is already an anything scheduled other than
                           another overwrite.
     """
     promise = _set_action(self._writes, key, self.do_writes,
-        partial(OverwriteAction, key, document, revision))
+        partial(OverwriteAction, key, document, revision), converter)
     return promise
 
-  def update(self, key, updatefn):
+  def update(self, key, updatefn, converter=None):
     """Queue up a document update function.  On commit, the document
     associated with given key will be retrieved, and the function will be
     called on the document.  If the document does not exist in the database,
@@ -354,23 +369,33 @@ class CouchBatch(object):
 
     @param key            The key of the document to update
     @param updatefn       The function that will transform the document data
+    @param converter      A function that, once the promise is given a value,
+                          will immediately be called with that promise. If it
+                          returns a truthy value, that value will be used as
+                          the promise's value instead of whatever it would
+                          have had.
     @raise ScheduleError  If there is already a delete scheduled for this key
     """
     promise = _set_action(self._writes, key, self.do_writes,
-        partial(UpdateAction, key, updatefn))
+        partial(UpdateAction, key, updatefn), converter)
     return promise
 
-  def delete(self, key):
+  def delete(self, key, converter=None):
     """Delete a document.  The promise returned here will contain a dictionary
     with the keys "rev", "id", and "ok", or it will raise a ResourceNotFound
     exception.
 
     @param key            The key of the document to delete.
+    @param converter      A function that, once the promise is given a value,
+                          will immediately be called with that promise. If it
+                          returns a truthy value, that value will be used as
+                          the promise's value instead of whatever it would
+                          have had.
     @raise ScheduleError  If anything other than an overwrite is already
                           scheduled for this key
     """
     promise = _set_action(self._writes, key, self.do_writes,
-        partial(DeleteAction, key))
+        partial(DeleteAction, key), converter)
     return promise
 
 def _fulfill(actions, key, result):
@@ -384,18 +409,23 @@ def _fulfill(actions, key, result):
     actions[key].promise._fulfill(result)
     del actions[key]
 
-def _set_action(actions, key, completer_fn, action_fn):
+def _set_action(actions, key, completer_fn, action_fn, converter_fn):
   """Assign (or re-assign) the action for the given key.  This generates a new
   Promise chained to the promise of the already-present action for the key (if
   any).  It then gives that promise to the given action_fn to generate a new
   Action, which it stores in the actions dictionary.  The new promise is
   returned from this function.
 
-  @param actions      The dictionary of key -> action
-  @param key          The key we want to set the action for
-  @param completer_fn The function the promise needs to call when its value is
-                      requested
-  @param action_fn    The function that will give us an Action
+  @param actions        The dictionary of key -> action
+  @param key            The key we want to set the action for
+  @param completer_fn   The function the promise needs to call when its value
+                        is requested
+  @param action_fn      The function that will give us an Action
+  @param converter_fn   A function that, once the promise is given a value,
+                        will immediately be called with that promise. If it
+                        returns a truthy value, that value will be used as
+                        the promise's value instead of whatever it would
+                        have had.
   @return             A new promise object to give to the user
   """
   try:
@@ -405,7 +435,7 @@ def _set_action(actions, key, completer_fn, action_fn):
     existing     = None
     prev_promise = None
   
-  promise = Promise(completer_fn, prev_promise)
+  promise = Promise(completer_fn, prev_promise, converter_fn)
   new     = action_fn(promise)
 
   if isinstance(existing, CreateAction):

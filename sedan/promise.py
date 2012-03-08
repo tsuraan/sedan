@@ -4,6 +4,7 @@ bulk operations return.
 from .result import DbFailure
 from .result import DbResult
 from .result import DbValue
+import copy
 
 class Promise(object):
   """This is what is returned by the single-document database interaction
@@ -16,8 +17,9 @@ class Promise(object):
   represents the result from the database, it will either return a dictionary
   or it will raise an exception.
   """
-  def __init__(self, completer_fn, previous=None):
+  def __init__(self, completer_fn, previous=None, gotresult_fn=None):
     self.__completer = completer_fn
+    self.__gotresult = gotresult_fn
     self.__result    = None
     if previous:
       assert isinstance(previous, Promise)
@@ -31,7 +33,7 @@ class Promise(object):
     if isinstance(self.__result, DbFailure):
       raise self.__result.value
     elif isinstance(self.__result, DbValue):
-      return self.__result.value
+      return copy.deepcopy(self.__result.value)
     raise RuntimeError("Unexpected result type: %s" % type(result))
 
   def _fulfill(self, result):
@@ -42,4 +44,11 @@ class Promise(object):
     if self.__previous:
       self.__previous._fulfill(result)
 
+    if self.__gotresult:
+      try:
+        newvalue = DbValue(self.__gotresult(self))
+      except Exception, e:
+        newvalue = DbFailure(e)
+      if newvalue:
+        self.__result = newvalue
 
