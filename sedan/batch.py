@@ -194,6 +194,7 @@ class CouchBatch(object):
     writes       = self._writes
     self._writes = {}
     start        = time.time()
+    promises     = [action.promise for action in writes.values()]
 
     while True:
       if not writes:
@@ -289,6 +290,8 @@ class CouchBatch(object):
     if writes:
       for action in writes.values():
         action.promise._fulfill(DbFailure(_make_conflict(action.docid)))
+    return promises
+
 
   def create(self, key, document, conflict_fn=None, converter=None):
     """Create a new document.  The promise returned from this will have a
