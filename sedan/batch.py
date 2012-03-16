@@ -86,6 +86,10 @@ class CouchBatch(object):
     self.clear_cache()
     self._reset()
 
+  @property
+  def ck(self):
+    return self.__ck
+
   def new_batch(self):
     """Create a new batch that shares this batch's couch connection, but
     nothing else.  This may be useful when a function passed to this batch's

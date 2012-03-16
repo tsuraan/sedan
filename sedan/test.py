@@ -931,6 +931,12 @@ class FakeCK(object):
       raise BulkSaveError(errors, results)
     return results
 
+  def save_doc(self, doc):
+    try:
+      return self.bulk_save([doc])
+    except BulkSaveError, e:
+      raise ResourceConflict(e.errors[0])
+
   def randid(self):
     """Generate a random docid"""
     return ''.join(chr(random.randint(0,255)) for _ in range(16)).encode('hex')
