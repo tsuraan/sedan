@@ -17,13 +17,18 @@ class Promise(object):
   represents the result from the database, it will either return a dictionary
   or it will raise an exception.
   """
-  def __init__(self, completer_fn, previous=None, gotresult_fn=None):
+  def __init__(self, key, completer_fn, previous=None, gotresult_fn=None):
     self.__completer = completer_fn
     self.__gotresult = gotresult_fn
     self.__result    = None
+    self.__key       = key
     if previous:
       assert isinstance(previous, Promise)
     self.__previous  = previous
+
+  @property
+  def key(self):
+    return self.__key
 
   def value(self):
     if not self.__result:

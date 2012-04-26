@@ -158,7 +158,7 @@ class CouchBatch(object):
       for key in keys:
         try:
           cached = self.__docCache[key]
-          promise = Promise(lambda: None)
+          promise = Promise(key, lambda: None)
           promise._fulfill(DbValue(cached))
           result[key] = promise
           self._stats['fromcache'] += 1
@@ -323,7 +323,7 @@ class CouchBatch(object):
     if key in self.__docCache:
       # We know that the key is in our cache, and thus is known to exist.
       # We'll return a promise that's already set as a failure.
-      promise = Promise(lambda: None, gotresult_fn=converter)
+      promise = Promise(key, lambda: None, gotresult_fn=converter)
       promise._fulfill(DbFailure(_make_conflict(key)))
       return promise
 
@@ -439,7 +439,7 @@ def _set_action(actions, key, completer_fn, action_fn, converter_fn):
     existing     = None
     prev_promise = None
   
-  promise = Promise(completer_fn, prev_promise, converter_fn)
+  promise = Promise(key, completer_fn, prev_promise, converter_fn)
   new     = action_fn(promise)
 
   if isinstance(existing, CreateAction):
@@ -448,7 +448,7 @@ def _set_action(actions, key, completer_fn, action_fn, converter_fn):
     elif isinstance(new, OverwriteAction):
       raise CreateScheduled
     elif isinstance(new, UpdateAction):
-      new, promise = _update_doc(new, existing, promise)
+      new, promise = _update_doc(key, new, existing, promise)
     elif isinstance(new, DeleteAction):
       raise CreateScheduled
   elif isinstance(existing, OverwriteAction):
@@ -459,7 +459,7 @@ def _set_action(actions, key, completer_fn, action_fn, converter_fn):
       # precedence; the promises are already chained
       pass
     elif isinstance(new, UpdateAction):
-      new, promise = _update_doc(new, existing, promise)
+      new, promise = _update_doc(key, new, existing, promise)
     elif isinstance(new, DeleteAction):
       # This is the natural action; new is already a delete, and the promises
       # are already chained
@@ -487,7 +487,7 @@ def _set_action(actions, key, completer_fn, action_fn, converter_fn):
   actions[key] = new
   return promise
 
-def _update_doc(new, existing, promise):
+def _update_doc(key, new, existing, promise):
   """Pass the doc to be created by the existing through the function stored in
   the new, wrap the result in a create.  If the update function throws an
   exception, we will make a failed promise and throw away the update; if the
@@ -502,7 +502,7 @@ def _update_doc(new, existing, promise):
     updated = new.doc({'doc':existing.doc()})
   except Exception, e:
     new     = existing
-    promise = Promise(lambda: None)
+    promise = Promise(key, lambda: None)
     promise._fulfill(DbFailure(e))
   else:
     if updated:
@@ -512,7 +512,7 @@ def _update_doc(new, existing, promise):
         new = OverwriteAction(existing.docid, updated, None, promise)
     else:
       new     = existing
-      promise = Promise(lambda: None)
+      promise = Promise(key, lambda: None)
       promise._fulfill(DbValue(None))
   return new, promise
 
