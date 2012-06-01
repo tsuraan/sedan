@@ -36,3 +36,10 @@ class ViewResults(object):
             }
       yield row
 
+  def all(self):
+    """Get the entire view result as a list"""
+    lst = []
+    for item in self:
+      lst.append(item)
+    return lst
+

@@ -176,6 +176,7 @@ class CouchBatch(object):
     """Run a view.  It can be useful to run a view through the couch batch
     rather than directly through the couchkit object because when include_docs
     is given, the docs get added to the batch's cache.
+
     @param vname  The name of the view to query
     @param kwargs CouchDB view arguments
     @return The result of the view
@@ -187,7 +188,23 @@ class CouchBatch(object):
     else:
       return rows
 
-  def do_writes(self, timelimit=5):
+  def all(self, **kwargs):
+    """Return all the docs in couch.  If include_docs is set, all the docs
+    returned from this function will be added to this batch's cache.  This is
+    pretty much just a special view, so all the kwargs that a view can take,
+    this can take as well.
+
+    @param kwargs CouchDB view arguments
+    @return The result of the view
+    """
+    rows = self.__ck.all_docs(**kwargs)
+    self._stats['read'] += 1
+    if kwargs.get('include_docs'):
+      return ViewResults(rows, self.__docCache)
+    else:
+      return rows
+
+ def do_writes(self, timelimit=5):
     """Run the current batch of write operations.  This will fulfill all the
     promises we have outstanding on create, overwrite, update, and delete
     operations.
