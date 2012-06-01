@@ -204,7 +204,7 @@ class CouchBatch(object):
     else:
       return rows
 
- def do_writes(self, timelimit=5):
+  def do_writes(self, timelimit=5):
     """Run the current batch of write operations.  This will fulfill all the
     promises we have outstanding on create, overwrite, update, and delete
     operations.
