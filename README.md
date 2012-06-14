@@ -72,7 +72,7 @@ ResourceConflict if there is already something stored at that key.
 Overwrite looks like this:
 
 ```python
->>> promise = batch.create('key', {'document': 'overwrite'})
+>>> promise = batch.overwrite('key', {'document': 'overwrite'})
 >>> promise.value()
 ```
 
