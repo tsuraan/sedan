@@ -167,8 +167,13 @@ class CouchBatch(object):
 
     notcached = keys - set(result)
     for key in notcached:
-      result[key] = _set_action(self._reads, key, self.do_reads,
-          partial(ReadAction, key), None)
+      if key in self._reads:
+        result[key] = self._reads[key].promise
+      else:
+        promise = Promise(key, self.do_reads)
+	result[key] = promise
+	action  = ReadAction(key, promise)
+	self._reads[key] = action
 
     return result
 

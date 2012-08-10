@@ -24,7 +24,10 @@ class Promise(object):
     self.__key       = key
     if previous:
       assert isinstance(previous, Promise)
-    self.__previous  = previous
+      self.__peers = previous.__peers
+      self.__peers.add(self)
+    else:
+      self.__peers = set([self])
 
   @property
   def key(self):
@@ -41,14 +44,19 @@ class Promise(object):
       return copy.deepcopy(self.__result.value)
     raise RuntimeError("Unexpected result type: %s" % type(result))
 
-  def _fulfill(self, result):
+  def _fulfill(self, result, __recurse=True):
     if self.__result:
       raise RuntimeError("Promise already completed")
     assert isinstance(result, DbResult)
-    self.__result = result
-    if self.__previous:
-      self.__previous._fulfill(result)
+    if __recurse:
+      for promise in self.__peers:
+        try:
+          promise._fulfill(result, False)
+        except:
+          pass
+      return
 
+    self.__result = result
     if self.__gotresult:
       try:
         newvalue = DbValue(self.__gotresult(self))
