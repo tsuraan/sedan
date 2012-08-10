@@ -937,6 +937,13 @@ class FakeCK(object):
     except BulkSaveError, e:
       raise ResourceConflict(e.errors[0])
 
+  def get(self, key):
+    try:
+      row = self.__docs[key]
+    except KeyError:
+      raise ResourceNotFound
+    return row['doc']
+
   def randid(self):
     """Generate a random docid"""
     return ''.join(chr(random.randint(0,255)) for _ in range(16)).encode('hex')
